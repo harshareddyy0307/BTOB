@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Plus, Building2, Eye, Pencil, Power, Loader2 } from "lucide-react";
-import { extractEdgeFunctionError, supabase } from "@/lib/supabase";
+import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
 import { formatDate } from "@/lib/utils";
 import type { CustomerProfile } from "@/types/database";
 import { Button } from "@/components/ui/button";
@@ -107,8 +107,9 @@ export function CustomersPage() {
         if (error) throw error;
         toast({ title: "Customer business updated", type: "success" });
       } else {
-        const { data, error } = await supabase.functions.invoke("create-customer-user", {
-          body: {
+        await invokeAuthenticatedFunction(
+          "create-customer-user",
+          {
             business_name: businessName.trim(),
             owner_name: ownerName.trim(),
             phone: phone.trim(),
@@ -122,10 +123,8 @@ export function CustomersPage() {
             business_category: businessCategory.trim(),
             status,
           },
-        });
-        if (error || data?.error) {
-          throw new Error(await extractEdgeFunctionError(error, data, "Failed to provision customer login"));
-        }
+          "Failed to provision customer login"
+        );
         toast({
           title: "Customer registered & login created",
           description: `Credentials created for ${email.trim().toLowerCase()}`,
@@ -150,10 +149,17 @@ export function CustomersPage() {
     const nextActive = c.status !== "active";
     try {
       if (c.user_id) {
-        const { data, error } = await supabase.functions.invoke("manage-staff-user", {
-          body: { action: "toggle_user_status", user_id: c.user_id, is_active: nextActive },
-        });
-        if (error || data?.error) {
+        try {
+          await invokeAuthenticatedFunction(
+            "manage-staff-user",
+            { action: "toggle_user_status", user_id: c.user_id, is_active: nextActive },
+            "Failed to update user status"
+          );
+        } catch (fnErr) {
+          const msg = fnErr instanceof Error ? fnErr.message : "";
+          if (/expired|signed out|sign in/i.test(msg)) {
+            throw fnErr;
+          }
           // Staff might not have admin-level ban rights, fallback to updating customer table status
           const { error: custErr } = await supabase
             .from("customers")

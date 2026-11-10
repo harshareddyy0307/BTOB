@@ -95,8 +95,56 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [loadUserDetails]);
 
+  const isHardAuthFailure = (err: unknown): boolean => {
+    if (!err || typeof err !== "object") return false;
+    const e = err as { status?: number; code?: string; message?: string };
+    if (e.status === 401 || e.status === 403) return true;
+    const combined = `${e.code || ""} ${e.message || ""}`.toLowerCase();
+    return (
+      combined.includes("session_not_found") ||
+      combined.includes("session from session_id claim") ||
+      combined.includes("refresh_token_not_found") ||
+      combined.includes("invalid refresh token") ||
+      combined.includes("invalid_grant") ||
+      combined.includes("user_not_found") ||
+      combined.includes("invalid jwt") ||
+      combined.includes("bad_jwt")
+    );
+  };
+
   useEffect(() => {
     let mounted = true;
+    let lastVerifyAt = 0;
+
+    async function verifySessionHealth() {
+      if (!isSupabaseConfigured || !mounted) return;
+      const now = Date.now();
+      if (now - lastVerifyAt < 30_000) return;
+      lastVerifyAt = now;
+
+      const { data } = await supabase.auth.getSession();
+      if (!data.session?.access_token) return;
+
+      const { error: userErr } = await supabase.auth.getUser(data.session.access_token);
+      if (!userErr) return;
+
+      const { data: refData, error: refErr } = await supabase.auth.refreshSession();
+      let retryErr: unknown = null;
+      if (!refErr && refData.session?.access_token) {
+        const retryRes = await supabase.auth.getUser(refData.session.access_token);
+        retryErr = retryRes.error;
+        if (!retryErr) return;
+      }
+
+      if (isHardAuthFailure(userErr) || isHardAuthFailure(refErr) || isHardAuthFailure(retryErr)) {
+        await supabase.auth.signOut({ scope: "local" });
+        if (mounted) {
+          setSession(null);
+          setUserProfile(null);
+          setCustomerProfile(null);
+        }
+      }
+    }
 
     async function init() {
       if (!isSupabaseConfigured) {
@@ -104,25 +152,67 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      await refreshBranding();
-      const { data } = await supabase.auth.getSession();
-      if (!mounted) return;
+      try {
+        await refreshBranding();
+        const { data } = await supabase.auth.getSession();
+        if (!mounted) return;
 
-      setSession(data.session);
-      if (data.session?.user) {
-        await loadUserDetails(data.session.user.id);
+        let activeSession = data.session;
+        if (activeSession?.access_token) {
+          const { error: userErr } = await supabase.auth.getUser(activeSession.access_token);
+          if (userErr) {
+            const { data: refData, error: refErr } = await supabase.auth.refreshSession();
+            if (!refErr && refData.session?.access_token) {
+              const { error: retryErr } = await supabase.auth.getUser(refData.session.access_token);
+              if (!retryErr) {
+                activeSession = refData.session;
+              } else if (isHardAuthFailure(retryErr)) {
+                activeSession = null;
+              }
+            } else if (isHardAuthFailure(userErr) || isHardAuthFailure(refErr)) {
+              activeSession = null;
+            }
+
+            if (!activeSession) {
+              await supabase.auth.signOut({ scope: "local" });
+            }
+          }
+        }
+
+        lastVerifyAt = Date.now();
+        if (!mounted) return;
+        setSession(activeSession);
+        if (activeSession?.user) {
+          await loadUserDetails(activeSession.user.id);
+        }
+      } finally {
+        if (mounted) setLoading(false);
       }
-      if (mounted) setLoading(false);
     }
 
     init();
 
     if (!isSupabaseConfigured) return;
 
+    const handleFocus = () => {
+      void verifySessionHealth();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void verifySessionHealth();
+      }
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
+    } = supabase.auth.onAuthStateChange(async (event, nextSession) => {
       if (!mounted) return;
+      if (event === "INITIAL_SESSION") {
+        // Wait for init() to verify the stored session against Supabase Auth
+        return;
+      }
       setSession(nextSession);
       if (nextSession?.user) {
         await loadUserDetails(nextSession.user.id);
@@ -135,6 +225,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       mounted = false;
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       subscription.unsubscribe();
     };
   }, [loadUserDetails, refreshBranding]);
@@ -152,14 +244,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     const role = await loadUserDetails(data.user.id);
     if (!role) {
-      await supabase.auth.signOut();
+      await supabase.auth.signOut({ scope: "local" });
       return { error: "Your account is inactive or lacks an assigned portal role." };
     }
     return { error: null, role };
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: "local" });
     setSession(null);
     setUserProfile(null);
     setCustomerProfile(null);

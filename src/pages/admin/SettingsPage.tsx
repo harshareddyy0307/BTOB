@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Settings, Users, ShieldCheck, Upload, Plus, Power, Loader2, History } from "lucide-react";
-import { extractEdgeFunctionError, supabase } from "@/lib/supabase";
+import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
 import { uploadStorageFile } from "@/lib/storage";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDateTime } from "@/lib/utils";
@@ -142,8 +142,9 @@ export function SettingsPage() {
     if (!isOwnerAdmin) return;
     setCreatingStaff(true);
     try {
-      const { data, error } = await supabase.functions.invoke("manage-staff-user", {
-        body: {
+      await invokeAuthenticatedFunction(
+        "manage-staff-user",
+        {
           action: "create_staff",
           full_name: staffName.trim(),
           email: staffEmail.trim().toLowerCase(),
@@ -151,10 +152,8 @@ export function SettingsPage() {
           password: staffPassword,
           role_name: staffRole,
         },
-      });
-      if (error || data?.error) {
-        throw new Error(await extractEdgeFunctionError(error, data, "Failed to create staff account"));
-      }
+        "Failed to create staff account"
+      );
       toast({ title: `${staffRole.toUpperCase()} account created for ${staffEmail.trim()}`, type: "success" });
       setStaffOpen(false);
       setStaffName("");
@@ -172,16 +171,15 @@ export function SettingsPage() {
   const toggleStaffStatus = async (u: AppUser) => {
     if (!isOwnerAdmin) return;
     try {
-      const { data, error } = await supabase.functions.invoke("manage-staff-user", {
-        body: {
+      await invokeAuthenticatedFunction(
+        "manage-staff-user",
+        {
           action: "toggle_user_status",
           user_id: u.id,
           is_active: !u.is_active,
         },
-      });
-      if (error || data?.error) {
-        throw new Error(await extractEdgeFunctionError(error, data, "Failed to update user status"));
-      }
+        "Failed to update user status"
+      );
       toast({ title: `${u.full_name} ${!u.is_active ? "activated" : "deactivated"}`, type: "info" });
       queryClient.invalidateQueries({ queryKey: ["admin-staff-users"] });
     } catch (err) {

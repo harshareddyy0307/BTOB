@@ -26,22 +26,35 @@ Deno.serve(async (req: Request) => {
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
     const callerClient = createClient(supabaseUrl, anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
       global: { headers: { Authorization: authHeader } },
     });
-    const token = authHeader.replace(/^Bearer\s+/i, "");
+    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+    if (!token) {
+      return new Response(JSON.stringify({ error: "Missing bearer token" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
     const {
       data: { user: caller },
       error: callerError,
     } = await callerClient.auth.getUser(token);
 
     if (callerError || !caller) {
-      return new Response(JSON.stringify({ error: "Invalid session token" }), {
+      const msg =
+        callerError?.code === "session_not_found" || callerError?.message?.toLowerCase().includes("session")
+          ? "Session expired or signed out. Please sign in again."
+          : callerError?.message || "Invalid session token";
+      return new Response(JSON.stringify({ error: msg }), {
         status: 401,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const adminClient = createClient(supabaseUrl, serviceRoleKey);
+    const adminClient = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
 
     const { data: callerProfile } = await adminClient
       .from("users")
