@@ -54,6 +54,8 @@ interface ReportOrder {
   subtotal: number;
   tax_total: number;
   total_amount: number;
+  paid_amount: number;
+  due_amount: number;
   order_status: string;
   payment_status: string;
   placed_at: string;
@@ -98,7 +100,7 @@ export function ReportsPage() {
         supabase
           .from("orders")
           .select(
-            "id, order_number, customer_id, subtotal, tax_total, total_amount, order_status, payment_status, placed_at, customers(id, business_name, city, state), order_items(id, product_id, product_name_snapshot, sku_snapshot, quantity, unit_selling_price, line_total, order_item_financials(manufacturer_id, manufacturer_name_snapshot, unit_manufacturer_price, margin_amount_total))"
+            "id, order_number, customer_id, subtotal, tax_total, total_amount, paid_amount, due_amount, order_status, payment_status, placed_at, customers(id, business_name, city, state), order_items(id, product_id, product_name_snapshot, sku_snapshot, quantity, unit_selling_price, line_total, order_item_financials(manufacturer_id, manufacturer_name_snapshot, unit_manufacturer_price, margin_amount_total))"
           )
           .order("placed_at", { ascending: false }),
         supabase
@@ -293,30 +295,34 @@ export function ReportsPage() {
       mfgPoMap.set(po.manufacturer_id, row);
     }
 
-    // 8. Outstanding Payments
+    // 8. Outstanding Payments (all non-cancelled orders with remaining due_amount > 0, enriched with invoice meta if issued)
     const todayMs = Date.now();
-    const outstandingRows = invoices
-      .filter((inv) => inv.payment_status !== "paid")
-      .filter((inv) => {
-        if (fromDate && inv.invoice_date < fromDate) return false;
-        if (toDate && inv.invoice_date > toDate) return false;
-        return true;
+    const invoiceByOrderId = new Map(invoices.map((inv) => [inv.order_id, inv]));
+    const outstandingRows = orders
+      .filter((o) => {
+        const due = Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - Number(o.paid_amount ?? 0)));
+        return due > 0.005 || o.payment_status !== "paid";
       })
-      .map((inv) => {
-        const balance = Math.max(0, Number(inv.total_amount) - Number(inv.paid_amount));
-        const dueMs = new Date(inv.due_date).getTime();
+      .map((o) => {
+        const inv = invoiceByOrderId.get(o.id);
+        const total = Number(o.total_amount);
+        const paid = Number(o.paid_amount ?? 0);
+        const balance = Math.max(0, Number(o.due_amount ?? total - paid));
+        const defaultDueIso = new Date(new Date(o.placed_at).getTime() + 15 * 86400000).toISOString().slice(0, 10);
+        const dueDate = inv?.due_date || defaultDueIso;
+        const dueMs = new Date(dueDate).getTime();
         const daysOverdue = Math.max(0, Math.floor((todayMs - dueMs) / (1000 * 60 * 60 * 24)));
         return {
-          invoice_number: inv.invoice_number,
-          customer: inv.customers?.business_name || "—",
-          order_number: inv.orders?.order_number || "—",
-          invoice_date: inv.invoice_date,
-          due_date: inv.due_date,
+          invoice_number: inv ? inv.invoice_number : `${o.order_number} (No Invoice)`,
+          customer: o.customers?.business_name || "—",
+          order_number: o.order_number,
+          invoice_date: inv?.invoice_date || o.placed_at.slice(0, 10),
+          due_date: dueDate,
           days_overdue: daysOverdue,
-          total_amount: Number(inv.total_amount),
-          paid_amount: Number(inv.paid_amount),
+          total_amount: total,
+          paid_amount: paid,
           balance_due: Math.round(balance * 100) / 100,
-          payment_status: inv.payment_status,
+          payment_status: o.payment_status,
         };
       });
 
@@ -797,11 +803,11 @@ export function ReportsPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Invoice #</TableHead>
+                      <TableHead>Order / Invoice #</TableHead>
                       <TableHead>Customer</TableHead>
                       <TableHead>Due Date</TableHead>
                       <TableHead>Days Overdue</TableHead>
-                      <TableHead>Total</TableHead>
+                      <TableHead>Total / Paid</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead className="text-right">Balance Due</TableHead>
                     </TableRow>
@@ -815,14 +821,20 @@ export function ReportsPage() {
                       </TableRow>
                     ) : (
                       computed.outstandingPayments.map((r) => (
-                        <TableRow key={r.invoice_number}>
-                          <TableCell className="font-semibold">{r.invoice_number}</TableCell>
+                        <TableRow key={r.order_number}>
+                          <TableCell>
+                            <p className="font-mono text-xs font-semibold text-slate-900">{r.order_number}</p>
+                            <p className="text-[11px] text-slate-500">{r.invoice_number}</p>
+                          </TableCell>
                           <TableCell>{r.customer}</TableCell>
                           <TableCell className="text-xs text-slate-500">{formatDate(r.due_date)}</TableCell>
                           <TableCell className={r.days_overdue > 0 ? "font-semibold text-red-700" : "text-xs text-slate-500"}>
                             {r.days_overdue > 0 ? `${r.days_overdue} days` : "Current"}
                           </TableCell>
-                          <TableCell>{formatCurrency(r.total_amount, sym)}</TableCell>
+                          <TableCell>
+                            <p className="font-medium text-slate-900">{formatCurrency(r.total_amount, sym)}</p>
+                            <p className="text-xs text-emerald-700">Paid: {formatCurrency(r.paid_amount, sym)}</p>
+                          </TableCell>
                           <TableCell>
                             <StatusBadge status={r.payment_status} />
                           </TableCell>

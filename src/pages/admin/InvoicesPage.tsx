@@ -136,6 +136,10 @@ export function InvoicesPage() {
       queryClient.invalidateQueries({ queryKey: ["admin-invoices"] });
       queryClient.invalidateQueries({ queryKey: ["admin-orders-needing-invoice"] });
       queryClient.invalidateQueries({ queryKey: ["admin-orders"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-daily-operations"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-order-detail"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-customer-orders"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-customer-invoices"] });
     } catch (err) {
       toast({ title: "Could not generate invoice", description: err instanceof Error ? err.message : "Error", type: "error" });
     } finally {
@@ -171,7 +175,17 @@ export function InvoicesPage() {
       setPayInvoice(null);
       queryClient.invalidateQueries({ queryKey: ["admin-invoices"] });
       queryClient.invalidateQueries({ queryKey: ["admin-orders"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-daily-operations"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-order-detail"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-order-invoice"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-invoice-payments"] });
       queryClient.invalidateQueries({ queryKey: ["admin-invoice-payments-modal"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-customer-orders"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-customer-invoices"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-dashboard-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-reports-dataset"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-notifications"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-order-payment-claims"] });
     } catch (err) {
       toast({ title: "Failed to record payment", description: err instanceof Error ? err.message : "Error", type: "error" });
     } finally {
@@ -192,7 +206,7 @@ export function InvoicesPage() {
       customer: inv.customers,
       order: inv.orders,
       items: (orderItems ?? []) as OrderItemRecord[],
-      payments: (payments ?? []) as PaymentRecord[],
+      payments: ((payments ?? []) as PaymentRecord[]).filter((p) => p.status !== "voided"),
     });
   };
 
@@ -620,12 +634,12 @@ export function InvoicesPage() {
               </TableHeader>
               <TableBody>
                 {selectedInvoicePayments.map((p) => (
-                  <TableRow key={p.id}>
+                  <TableRow key={p.id} className={p.status === "voided" ? "bg-slate-50 opacity-60 line-through" : undefined}>
                     <TableCell className="text-xs">{formatDate(p.payment_date)}</TableCell>
                     <TableCell className="text-xs font-medium">{p.payment_method}</TableCell>
                     <TableCell className="font-mono text-xs text-slate-600">{p.reference_number || "—"}</TableCell>
                     <TableCell className="text-right font-semibold text-emerald-700">
-                      {formatCurrency(p.amount, sym)}
+                      {p.status === "voided" ? "Voided" : formatCurrency(p.amount, sym)}
                     </TableCell>
                   </TableRow>
                 ))}

@@ -1,9 +1,10 @@
 import React, { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, Trash2, Loader2 } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Loader2, IndianRupee } from "lucide-react";
 import { supabase } from "@/lib/supabase";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { useAuth } from "@/contexts/AuthContext";
+import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import type { AdminProduct, CustomerProfile, InvoiceRecord, OrderRecord } from "@/types/database";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,15 +14,19 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { useToast } from "@/components/ui/toast";
+import { OrderPaymentModal, type OrderPaymentTarget } from "@/components/admin/OrderPaymentModal";
 
 export function CustomerDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const { branding } = useAuth();
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const sym = branding.currency_symbol || "₹";
 
   const [selectedProdId, setSelectedProdId] = useState("");
   const [customPrice, setCustomPrice] = useState("");
   const [savingOverride, setSavingOverride] = useState(false);
+  const [paymentOrder, setPaymentOrder] = useState<OrderPaymentTarget | null>(null);
 
   const { data: customer, isLoading } = useQuery({
     queryKey: ["admin-customer-detail", id],
@@ -118,9 +123,13 @@ export function CustomerDetailPage() {
   if (isLoading) return <div className="py-12 text-center text-sm text-slate-500">Loading customer profile...</div>;
   if (!customer) return <div className="py-12 text-center text-sm text-red-600">Customer not found.</div>;
 
-  const totalBilled = invoices.reduce((acc, inv) => acc + Number(inv.total_amount), 0);
-  const totalPaid = invoices.reduce((acc, inv) => acc + Number(inv.paid_amount), 0);
-  const outstandingBalance = Math.max(0, totalBilled - totalPaid);
+  const activeOrders = orders.filter((o) => o.order_status !== "Cancelled");
+  const totalOrdered = activeOrders.reduce((acc, o) => acc + Number(o.total_amount), 0);
+  const totalPaid = activeOrders.reduce((acc, o) => acc + Number(o.paid_amount ?? 0), 0);
+  const outstandingBalance = activeOrders.reduce(
+    (acc, o) => acc + Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - Number(o.paid_amount ?? 0))),
+    0
+  );
 
   return (
     <div className="space-y-6">
@@ -150,19 +159,21 @@ export function CustomerDetailPage() {
             </div>
           </div>
 
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-2">
+          <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-4">
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Account Financial Summary</p>
             <div className="flex justify-between text-sm">
-              <span className="text-slate-600">Total Billed</span>
-              <span className="font-semibold">{formatCurrency(totalBilled)}</span>
+              <span className="text-slate-600">Active Orders Total</span>
+              <span className="font-semibold">{formatCurrency(totalOrdered, sym)}</span>
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-slate-600">Paid to Date</span>
-              <span className="font-semibold text-emerald-700">{formatCurrency(totalPaid)}</span>
+              <span className="font-semibold text-emerald-700">{formatCurrency(totalPaid, sym)}</span>
             </div>
             <div className="flex justify-between border-t border-slate-200 pt-2 text-sm">
-              <span className="font-medium text-slate-800">Outstanding Dues</span>
-              <span className="font-bold text-red-700">{formatCurrency(outstandingBalance)}</span>
+              <span className="font-medium text-slate-800">Amount Due</span>
+              <span className={cn("font-bold", outstandingBalance > 0 ? "text-red-700" : "text-emerald-700")}>
+                {formatCurrency(outstandingBalance, sym)}
+              </span>
             </div>
           </div>
         </CardContent>
@@ -174,8 +185,8 @@ export function CustomerDetailPage() {
           <CardTitle>Customer-Specific Selling Prices (Optional)</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <form onSubmit={addCustomPrice} className="grid gap-3 sm:grid-cols-4 items-end">
-            <div className="sm:col-span-2 space-y-1.5">
+          <form onSubmit={addCustomPrice} className="grid items-end gap-3 sm:grid-cols-4">
+            <div className="space-y-1.5 sm:col-span-2">
               <Label>Published Product</Label>
               <Select value={selectedProdId} onValueChange={setSelectedProdId}>
                 <SelectTrigger>
@@ -184,14 +195,14 @@ export function CustomerDetailPage() {
                 <SelectContent>
                   {allProducts.map((p) => (
                     <SelectItem key={p.id} value={p.id}>
-                      {p.name} ({p.sku}) — Standard: {formatCurrency(p.product_prices?.published_selling_price ?? 0)}
+                      {p.name} ({p.sku}) — Standard: {formatCurrency(p.product_prices?.published_selling_price ?? 0, sym)}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label>Custom Price (₹)</Label>
+              <Label>Custom Price ({sym})</Label>
               <Input type="number" step="0.01" min="0" value={customPrice} onChange={(e) => setCustomPrice(e.target.value)} required />
             </div>
             <Button type="submit" disabled={savingOverride || !selectedProdId}>
@@ -223,8 +234,8 @@ export function CustomerDetailPage() {
                         <p className="font-medium">{prod?.name}</p>
                         <p className="font-mono text-xs text-slate-500">{prod?.sku}</p>
                       </TableCell>
-                      <TableCell>{formatCurrency(prod?.product_prices?.published_selling_price ?? 0)}</TableCell>
-                      <TableCell className="font-semibold text-blue-700">{formatCurrency(cp.custom_selling_price)}</TableCell>
+                      <TableCell>{formatCurrency(prod?.product_prices?.published_selling_price ?? 0, sym)}</TableCell>
+                      <TableCell className="font-semibold text-blue-700">{formatCurrency(cp.custom_selling_price, sym)}</TableCell>
                       <TableCell className="text-right">
                         <Button variant="ghost" size="icon" className="text-red-600" onClick={() => removeCustomPrice(cp.id)}>
                           <Trash2 className="h-4 w-4" />
@@ -243,40 +254,80 @@ export function CustomerDetailPage() {
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>Order History ({orders.length})</CardTitle>
+            <CardTitle>Order History &amp; Payment Dues ({orders.length})</CardTitle>
           </CardHeader>
           <CardContent className="p-0">
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Order #</TableHead>
-                  <TableHead>Date</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Total</TableHead>
+                  <TableHead>Total / Paid</TableHead>
+                  <TableHead>Due</TableHead>
+                  <TableHead className="text-right">Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {orders.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={4} className="py-6 text-center text-slate-500">
+                    <TableCell colSpan={5} className="py-6 text-center text-slate-500">
                       No orders placed yet.
                     </TableCell>
                   </TableRow>
                 ) : (
-                  orders.map((o) => (
-                    <TableRow key={o.id}>
-                      <TableCell>
-                        <Link to={`/admin/orders/${o.id}`} className="font-semibold text-blue-700 hover:underline">
-                          {o.order_number}
-                        </Link>
-                      </TableCell>
-                      <TableCell className="text-xs text-slate-500">{formatDate(o.placed_at)}</TableCell>
-                      <TableCell>
-                        <StatusBadge status={o.order_status} />
-                      </TableCell>
-                      <TableCell className="text-right font-semibold">{formatCurrency(o.total_amount)}</TableCell>
-                    </TableRow>
-                  ))
+                  orders.map((o) => {
+                    const paidAmt = Number(o.paid_amount ?? 0);
+                    const dueAmt =
+                      o.order_status === "Cancelled"
+                        ? 0
+                        : Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - paidAmt));
+                    return (
+                      <TableRow key={o.id}>
+                        <TableCell>
+                          <Link to={`/admin/orders/${o.id}`} className="font-semibold text-blue-700 hover:underline">
+                            {o.order_number}
+                          </Link>
+                          <p className="text-[11px] text-slate-500">{formatDate(o.placed_at)}</p>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-col gap-1">
+                            <StatusBadge status={o.order_status} />
+                            <StatusBadge status={o.payment_status} />
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          <p className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</p>
+                          <p className="text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</p>
+                        </TableCell>
+                        <TableCell className={cn("text-xs font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
+                          {o.order_status === "Cancelled" ? "—" : formatCurrency(dueAmt, sym)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {o.order_status !== "Cancelled" && (
+                            <Button
+                              size="sm"
+                              variant={dueAmt > 0 ? "default" : "outline"}
+                              onClick={() =>
+                                setPaymentOrder({
+                                  id: o.id,
+                                  order_number: o.order_number,
+                                  customer_name: customer.business_name,
+                                  total_amount: Number(o.total_amount),
+                                  paid_amount: paidAmt,
+                                  due_amount: dueAmt,
+                                  payment_status: o.payment_status,
+                                  order_status: o.order_status,
+                                })
+                              }
+                            >
+                              <IndianRupee className="h-3.5 w-3.5" />
+                              Pay
+                            </Button>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })
                 )}
               </TableBody>
             </Table>
@@ -313,7 +364,7 @@ export function CustomerDetailPage() {
                         <StatusBadge status={inv.payment_status} />
                       </TableCell>
                       <TableCell className="text-right font-semibold text-red-700">
-                        {formatCurrency(Math.max(0, Number(inv.total_amount) - Number(inv.paid_amount)))}
+                        {formatCurrency(Math.max(0, Number(inv.total_amount) - Number(inv.paid_amount)), sym)}
                       </TableCell>
                     </TableRow>
                   ))
@@ -323,6 +374,8 @@ export function CustomerDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      <OrderPaymentModal order={paymentOrder} onClose={() => setPaymentOrder(null)} />
     </div>
   );
 }

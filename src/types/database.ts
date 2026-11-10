@@ -244,6 +244,8 @@ export interface OrderRecord {
   subtotal: number;
   tax_total: number;
   total_amount: number;
+  paid_amount: number;
+  due_amount: number;
   order_status: OrderStatus;
   payment_status: PaymentStatus;
   placed_at: string;
@@ -343,8 +345,21 @@ export interface PaymentRecord {
   payment_method: PaymentMethod;
   reference_number: string | null;
   payment_date: string;
+  status: "recorded" | "voided";
   notes: string | null;
   recorded_by: string | null;
+  created_at: string;
+}
+
+export interface NotificationRecord {
+  id: string;
+  recipient_role: UserRole | null;
+  recipient_user_id: string | null;
+  title: string;
+  message: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  is_read: boolean;
   created_at: string;
 }
 

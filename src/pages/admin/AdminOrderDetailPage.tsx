@@ -10,16 +10,19 @@ import {
   Loader2,
   MapPin,
   Split,
+  IndianRupee,
+  BellRing,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { generateCustomerInvoicePdf } from "@/lib/pdfGenerator";
-import { formatCurrency, formatDate, formatDateTime, formatQty } from "@/lib/utils";
+import { cn, formatCurrency, formatDate, formatDateTime, formatQty } from "@/lib/utils";
 import {
   ALL_ORDER_STATUSES,
   type AgencySettings,
   type CustomerProfile,
   type InvoiceRecord,
+  type NotificationRecord,
   type OrderItemFinancialRecord,
   type OrderItemRecord,
   type OrderRecord,
@@ -35,6 +38,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { useToast } from "@/components/ui/toast";
+import {
+  OrderPaymentModal,
+  parsePaymentClaimNotification,
+  type OrderPaymentTarget,
+  type PaymentPrefill,
+} from "@/components/admin/OrderPaymentModal";
 
 interface DetailedOrderItem extends OrderItemRecord {
   order_item_financials: OrderItemFinancialRecord | OrderItemFinancialRecord[] | null;
@@ -55,6 +64,10 @@ export function AdminOrderDetailPage() {
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [splitting, setSplitting] = useState(false);
   const [generatingInvoice, setGeneratingInvoice] = useState(false);
+  const [paymentModal, setPaymentModal] = useState<{
+    order: OrderPaymentTarget;
+    prefill?: PaymentPrefill | null;
+  } | null>(null);
 
   const { data: order, isLoading } = useQuery({
     queryKey: ["admin-order-detail", id],
@@ -123,8 +136,24 @@ export function AdminOrderDetailPage() {
         .from("payments")
         .select("*")
         .eq("invoice_id", invoice!.id)
-        .order("payment_date", { ascending: false });
+        .order("payment_date", { ascending: false })
+        .order("created_at", { ascending: false });
       return (data ?? []) as PaymentRecord[];
+    },
+  });
+
+  const { data: paymentClaims = [], refetch: refetchClaims } = useQuery({
+    queryKey: ["admin-order-payment-claims", id],
+    enabled: Boolean(id),
+    queryFn: async () => {
+      const { data } = await supabase
+        .from("notifications")
+        .select("*")
+        .eq("entity_type", "order_payment_claim")
+        .eq("entity_id", id!)
+        .eq("is_read", false)
+        .order("created_at", { ascending: false });
+      return (data ?? []) as NotificationRecord[];
     },
   });
 
@@ -141,10 +170,13 @@ export function AdminOrderDetailPage() {
     queryClient.invalidateQueries({ queryKey: ["admin-order-items", id] });
     queryClient.invalidateQueries({ queryKey: ["admin-order-linked-pos", id] });
     queryClient.invalidateQueries({ queryKey: ["admin-order-invoice", id] });
+    queryClient.invalidateQueries({ queryKey: ["admin-invoice-payments", invoice?.id] });
+    queryClient.invalidateQueries({ queryKey: ["admin-order-payment-claims", id] });
     queryClient.invalidateQueries({ queryKey: ["admin-orders"] });
     queryClient.invalidateQueries({ queryKey: ["admin-daily-operations"] });
     queryClient.invalidateQueries({ queryKey: ["admin-purchase-orders"] });
     queryClient.invalidateQueries({ queryKey: ["admin-dashboard-stats"] });
+    queryClient.invalidateQueries({ queryKey: ["admin-notifications"] });
   };
 
   const handleStatusUpdate = async (e: React.FormEvent) => {
@@ -217,6 +249,10 @@ export function AdminOrderDetailPage() {
 
   const isTerminal = order.order_status === "Delivered" || order.order_status === "Cancelled";
   const addr = order.delivery_address;
+  const paidAmt = Number(order.paid_amount ?? 0);
+  const dueAmt =
+    order.order_status === "Cancelled" ? 0 : Math.max(0, Number(order.due_amount ?? Number(order.total_amount) - paidAmt));
+  const activePayments = payments.filter((p) => p.status !== "voided");
 
   let totalMfgCost = 0;
   let totalGrossMargin = 0;
@@ -235,6 +271,22 @@ export function AdminOrderDetailPage() {
     }
   });
 
+  const openOrderPayment = (prefill?: PaymentPrefill) => {
+    setPaymentModal({
+      order: {
+        id: order.id,
+        order_number: order.order_number,
+        customer_name: order.customers?.business_name || "Customer",
+        total_amount: Number(order.total_amount),
+        paid_amount: paidAmt,
+        due_amount: dueAmt,
+        payment_status: order.payment_status,
+        order_status: order.order_status,
+      },
+      prefill: prefill ?? null,
+    });
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -242,17 +294,46 @@ export function AdminOrderDetailPage() {
           <ArrowLeft className="h-4 w-4" />
           Back to Order Management
         </Link>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={order.order_status} />
           <StatusBadge status={order.payment_status} />
+          {order.order_status !== "Cancelled" && (
+            <Button size="sm" variant={dueAmt > 0 ? "default" : "outline"} onClick={() => openOrderPayment()}>
+              <IndianRupee className="h-3.5 w-3.5" />
+              {dueAmt > 0 ? "Mark Paid / Partial" : "Update Payment"}
+            </Button>
+          )}
         </div>
       </div>
+
+      {/* Customer Payment Alert Banner if customer notified agency */}
+      {paymentClaims.length > 0 && (
+        <Card className="border-amber-300 bg-amber-50/80">
+          <CardContent className="flex flex-col justify-between gap-3 p-4 sm:flex-row sm:items-center">
+            <div className="flex items-start gap-2.5">
+              <BellRing className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+              <div className="space-y-0.5">
+                <p className="text-sm font-bold text-amber-950">{paymentClaims[0].title}</p>
+                <p className="text-xs text-amber-900">{paymentClaims[0].message}</p>
+              </div>
+            </div>
+            {order.order_status !== "Cancelled" && (
+              <Button
+                size="sm"
+                onClick={() => openOrderPayment(parsePaymentClaimNotification(paymentClaims[0].message))}
+              >
+                Verify &amp; Apply Payment
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Top Overview + Controls */}
       <div className="grid gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-2">
-          <CardContent className="p-6 space-y-5">
-            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+          <CardContent className="space-y-5 p-6">
+            <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
               <div>
                 <h1 className="text-2xl font-bold text-slate-900">{order.order_number}</h1>
                 <p className="mt-1 text-xs text-slate-500">Placed on {formatDateTime(order.placed_at)}</p>
@@ -264,16 +345,21 @@ export function AdminOrderDetailPage() {
                   &bull; GSTIN: <span className="font-mono">{order.customers?.gst_number || "Unregistered"}</span>
                 </p>
               </div>
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-right">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-right space-y-1">
                 <p className="text-[11px] font-semibold uppercase text-slate-500">Customer Grand Total</p>
                 <p className="text-xl font-bold text-slate-900">{formatCurrency(order.total_amount, sym)}</p>
-                <p className="text-xs font-semibold text-emerald-700">
-                  Gross Margin: +{formatCurrency(totalGrossMargin, sym)}
+                <p className="text-xs font-medium text-emerald-700">
+                  Paid: {formatCurrency(paidAmt, sym)} &bull; Gross Margin: +{formatCurrency(totalGrossMargin, sym)}
+                </p>
+                <p className={cn("text-sm font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
+                  {order.order_status === "Cancelled"
+                    ? "Order Cancelled"
+                    : `Amount Due: ${formatCurrency(dueAmt, sym)}`}
                 </p>
               </div>
             </div>
 
-            <div className="grid gap-4 border-t border-slate-100 pt-4 sm:grid-cols-2 text-sm">
+            <div className="grid gap-4 border-t border-slate-100 pt-4 text-sm sm:grid-cols-2">
               <div className="space-y-1">
                 <p className="flex items-center gap-1.5 text-xs font-semibold uppercase text-slate-500">
                   <MapPin className="h-3.5 w-3.5 text-blue-700" />
@@ -433,7 +519,7 @@ export function AdminOrderDetailPage() {
         </CardContent>
       </Card>
 
-      {/* Split Purchase Orders + Customer GST Invoice */}
+      {/* Split Purchase Orders + Order Payment & GST Invoice */}
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
@@ -472,16 +558,43 @@ export function AdminOrderDetailPage() {
         </Card>
 
         <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <ReceiptIndianRupee className="h-4 w-4 text-blue-700" />
-              Customer GST Tax Invoice
-            </CardTitle>
-            <CardDescription>Automatically computes CGST+SGST or IGST based on state match.</CardDescription>
+          <CardHeader className="flex flex-row items-start justify-between gap-2">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <ReceiptIndianRupee className="h-4 w-4 text-blue-700" />
+                Order Payments &amp; GST Invoice
+              </CardTitle>
+              <CardDescription>
+                Mark Paid, Unpaid, or Partially Paid directly here or review GST tax invoice.
+              </CardDescription>
+            </div>
+            {order.order_status !== "Cancelled" && (
+              <Button size="sm" variant={dueAmt > 0 ? "default" : "outline"} onClick={() => openOrderPayment()}>
+                Update Payment
+              </Button>
+            )}
           </CardHeader>
           <CardContent className="space-y-4">
+            {/* Live Order Payment Due Box */}
+            <div className="grid grid-cols-3 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
+              <div>
+                <p className="text-slate-500">Order Total</p>
+                <p className="mt-0.5 text-sm font-bold text-slate-900">{formatCurrency(order.total_amount, sym)}</p>
+              </div>
+              <div>
+                <p className="text-slate-500">Total Paid</p>
+                <p className="mt-0.5 text-sm font-bold text-emerald-700">{formatCurrency(paidAmt, sym)}</p>
+              </div>
+              <div>
+                <p className="text-slate-500">Remaining Due</p>
+                <p className={cn("mt-0.5 text-sm font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
+                  {formatCurrency(dueAmt, sym)}
+                </p>
+              </div>
+            </div>
+
             {invoice ? (
-              <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm">
+              <div className="space-y-3 rounded-lg border border-slate-200 bg-white p-4 text-sm">
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-base font-bold text-slate-900">{invoice.invoice_number}</p>
@@ -492,20 +605,16 @@ export function AdminOrderDetailPage() {
                   <StatusBadge status={invoice.payment_status} />
                 </div>
 
-                <div className="grid grid-cols-2 gap-2 text-xs text-slate-700 pt-1">
+                <div className="grid grid-cols-2 gap-2 pt-1 text-xs text-slate-700">
                   <p>Taxable Subtotal: {formatCurrency(invoice.subtotal, sym)}</p>
                   <p>
                     {invoice.is_inter_state
                       ? `IGST: ${formatCurrency(invoice.igst_amount, sym)}`
                       : `CGST ${formatCurrency(invoice.cgst_amount, sym)} + SGST ${formatCurrency(invoice.sgst_amount, sym)}`}
                   </p>
-                  <p className="font-semibold">Total: {formatCurrency(invoice.total_amount, sym)}</p>
-                  <p className="font-semibold text-red-700">
-                    Due: {formatCurrency(Math.max(0, Number(invoice.total_amount) - Number(invoice.paid_amount)), sym)}
-                  </p>
                 </div>
 
-                <div className="flex flex-wrap gap-2 pt-2">
+                <div className="flex flex-wrap gap-2 pt-1">
                   {agency && order.customers && (
                     <Button
                       size="sm"
@@ -516,7 +625,7 @@ export function AdminOrderDetailPage() {
                           customer: order.customers,
                           order,
                           items,
-                          payments,
+                          payments: activePayments,
                         })
                       }
                     >
@@ -526,23 +635,67 @@ export function AdminOrderDetailPage() {
                   )}
                   <Link to="/admin/invoices">
                     <Button size="sm" variant="outline">
-                      Manage Payments in Invoices
+                      Open All Invoices
                     </Button>
                   </Link>
                 </div>
               </div>
             ) : (
-              <div className="space-y-3 py-4 text-center">
-                <p className="text-sm text-slate-500">No tax invoice issued for this order yet.</p>
-                <Button onClick={handleGenerateInvoice} disabled={generatingInvoice || order.order_status === "Cancelled"}>
+              <div className="space-y-3 rounded-lg border border-dashed border-slate-200 py-4 text-center">
+                <p className="text-xs text-slate-500">
+                  No tax invoice generated yet. Recording a payment will auto-generate the GST invoice, or issue one manually:
+                </p>
+                <Button size="sm" variant="outline" onClick={handleGenerateInvoice} disabled={generatingInvoice || order.order_status === "Cancelled"}>
                   {generatingInvoice && <Loader2 className="h-4 w-4 animate-spin" />}
-                  Generate GST Tax Invoice
+                  Generate GST Tax Invoice Now
                 </Button>
+              </div>
+            )}
+
+            {/* Payment History Ledger */}
+            {payments.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                  Payment Ledger ({payments.length})
+                </p>
+                <div className="divide-y divide-slate-100 rounded-md border border-slate-200">
+                  {payments.map((p) => (
+                    <div
+                      key={p.id}
+                      className={cn(
+                        "flex items-center justify-between px-3 py-2 text-xs",
+                        p.status === "voided" && "bg-slate-50 opacity-60 line-through"
+                      )}
+                    >
+                      <div>
+                        <p className="font-medium text-slate-900">
+                          {p.payment_method} {p.reference_number ? `(${p.reference_number})` : ""}
+                        </p>
+                        <p className="text-[11px] text-slate-500">
+                          {formatDate(p.payment_date)}
+                          {p.notes ? ` • ${p.notes}` : ""}
+                        </p>
+                      </div>
+                      <span className="font-semibold text-emerald-700">
+                        {p.status === "voided" ? "Voided" : formatCurrency(p.amount, sym)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </CardContent>
         </Card>
       </div>
+
+      <OrderPaymentModal
+        order={paymentModal?.order ?? null}
+        prefill={paymentModal?.prefill ?? null}
+        onClose={() => {
+          setPaymentModal(null);
+          refetchClaims();
+        }}
+      />
     </div>
   );
 }

@@ -52,7 +52,7 @@ export function AdminDashboardPage() {
         supabase.from("categories").select("id", { count: "exact", head: true }),
         supabase
           .from("orders")
-          .select("id, order_number, total_amount, order_status, payment_status, placed_at, customers(business_name)")
+          .select("id, order_number, total_amount, paid_amount, due_amount, order_status, payment_status, placed_at, customers(business_name)")
           .order("placed_at", { ascending: false }),
         supabase.from("order_items").select("order_id, product_id, product_name_snapshot, quantity, line_total"),
         supabase.from("order_item_financials").select("order_item_id, margin_amount_total, order_items!inner(order_id)"),
@@ -81,6 +81,11 @@ export function AdminDashboardPage() {
       const completedOrders = orders.filter((o) => o.order_status === "Delivered").length;
 
       const totalSales = nonCancelledOrders.reduce((acc, o) => acc + Number(o.total_amount || 0), 0);
+      const totalCollected = nonCancelledOrders.reduce((acc, o) => acc + Number(o.paid_amount || 0), 0);
+      const totalDue = nonCancelledOrders.reduce(
+        (acc, o) => acc + Math.max(0, Number(o.due_amount ?? Number(o.total_amount || 0) - Number(o.paid_amount || 0))),
+        0
+      );
       const estimatedGrossMargin = financials.reduce((acc, f) => {
         const oid = (f.order_items as unknown as { order_id: string })?.order_id;
         return nonCancelledIds.has(oid) ? acc + Number(f.margin_amount_total || 0) : acc;
@@ -130,12 +135,17 @@ export function AdminDashboardPage() {
         productCatMap.set(p.id, cname);
       }
 
-      const topProdMap = new Map<string, { name: string; qty: number; revenue: number }>();
+      const topProdMap = new Map<string, { id: string; name: string; qty: number; revenue: number }>();
       const catSalesMap = new Map<string, number>();
 
       for (const item of orderItems) {
         if (!nonCancelledIds.has(item.order_id)) continue;
-        const prev = topProdMap.get(item.product_id) || { name: item.product_name_snapshot, qty: 0, revenue: 0 };
+        const prev = topProdMap.get(item.product_id) || {
+          id: item.product_id,
+          name: item.product_name_snapshot,
+          qty: 0,
+          revenue: 0,
+        };
         prev.qty += Number(item.quantity || 0);
         prev.revenue += Number(item.line_total || 0);
         topProdMap.set(item.product_id, prev);
@@ -163,6 +173,8 @@ export function AdminDashboardPage() {
         pendingOrders,
         completedOrders,
         totalSales,
+        totalCollected,
+        totalDue,
         estimatedGrossMargin,
         dailySalesChart,
         monthlyRevenueChart,
@@ -204,7 +216,7 @@ export function AdminDashboardPage() {
       </div>
 
       {/* Financial Summary Cards */}
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-4 md:grid-cols-3">
         <Card>
           <CardContent className="flex items-center justify-between p-5">
             <div>
@@ -234,6 +246,25 @@ export function AdminDashboardPage() {
             </div>
           </CardContent>
         </Card>
+
+        <Link to="/admin/orders">
+          <Card className="h-full transition-colors hover:border-red-300">
+            <CardContent className="flex items-center justify-between p-5">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Customer Amount Due</p>
+                <p className="mt-1 text-3xl font-bold text-red-700">
+                  {isLoading ? "—" : formatCurrency(data?.totalDue ?? 0, sym)}
+                </p>
+                <p className="mt-1 text-xs text-emerald-700 font-medium">
+                  Collected: {isLoading ? "—" : formatCurrency(data?.totalCollected ?? 0, sym)}
+                </p>
+              </div>
+              <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-red-50 text-red-700">
+                <Clock className="h-5 w-5" />
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
       </div>
 
       {/* Operational KPI Grid */}
@@ -328,7 +359,7 @@ export function AdminDashboardPage() {
             ) : (
               <div className="divide-y divide-slate-100">
                 {data.topProducts.map((p, idx) => (
-                  <div key={p.name} className="flex items-center justify-between py-3">
+                  <div key={p.id} className="flex items-center justify-between py-3">
                     <div>
                       <p className="text-sm font-medium text-slate-900">
                         {idx + 1}. {p.name}
@@ -369,10 +400,14 @@ export function AdminDashboardPage() {
                       <p className="text-xs text-slate-500">
                         {(o.customers as unknown as { business_name: string })?.business_name} &bull;{" "}
                         {formatDate(o.placed_at)}
+                        {o.order_status !== "Cancelled" && Number(o.due_amount ?? 0) > 0
+                          ? ` • Due ${formatCurrency(o.due_amount, sym)}`
+                          : ""}
                       </p>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2">
                       <StatusBadge status={o.order_status} />
+                      <StatusBadge status={o.payment_status} />
                       <span className="text-sm font-semibold text-slate-900">
                         {formatCurrency(o.total_amount, sym)}
                       </span>

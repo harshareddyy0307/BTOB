@@ -58,10 +58,10 @@ export function AdminLayout() {
         .select("*")
         .in("recipient_role", ["admin", "staff"])
         .order("created_at", { ascending: false })
-        .limit(12);
+        .limit(15);
       return data ?? [];
     },
-    refetchInterval: 30000,
+    refetchInterval: 15000,
   });
 
   const unreadCount = notifications.filter((n) => !n.is_read).length;
@@ -71,6 +71,19 @@ export function AdminLayout() {
     if (unreadIds.length === 0) return;
     await supabase.from("notifications").update({ is_read: true }).in("id", unreadIds);
     refetchNotifs();
+  };
+
+  const handleNotificationClick = async (n: (typeof notifications)[number]) => {
+    if (!n.is_read) {
+      await supabase.from("notifications").update({ is_read: true }).eq("id", n.id);
+      refetchNotifs();
+    }
+    setNotifOpen(false);
+    if ((n.entity_type === "order" || n.entity_type === "order_payment_claim") && n.entity_id) {
+      navigate(`/admin/orders/${n.entity_id}`);
+    } else if (n.entity_type === "purchase_order" && n.entity_id) {
+      navigate(`/admin/purchase-orders/${n.entity_id}`);
+    }
   };
 
   const handleSignOut = async () => {
@@ -189,6 +202,8 @@ export function AdminLayout() {
               type="button"
               onClick={() => setNotifOpen((o) => !o)}
               className="relative rounded-md border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-50"
+              title="Notifications"
+              aria-label="Notifications"
             >
               <Bell className="h-4 w-4" />
               {unreadCount > 0 && (
@@ -213,16 +228,25 @@ export function AdminLayout() {
                 ) : (
                   <div className="max-h-72 space-y-2 overflow-y-auto">
                     {notifications.map((n) => (
-                      <div
+                      <button
                         key={n.id}
+                        type="button"
+                        onClick={() => handleNotificationClick(n)}
                         className={cn(
-                          "rounded-md border p-2.5 text-xs",
-                          n.is_read ? "border-slate-100 bg-white" : "border-blue-100 bg-blue-50/50"
+                          "w-full rounded-md border p-2.5 text-left text-xs transition-colors hover:border-blue-300",
+                          n.is_read ? "border-slate-100 bg-white" : "border-blue-200 bg-blue-50/70"
                         )}
                       >
-                        <p className="font-semibold text-slate-900">{n.title}</p>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="font-semibold text-slate-900">{n.title}</p>
+                          {n.entity_type === "order_payment_claim" && (
+                            <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">
+                              Payment
+                            </span>
+                          )}
+                        </div>
                         <p className="mt-0.5 text-slate-600">{n.message}</p>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 )}

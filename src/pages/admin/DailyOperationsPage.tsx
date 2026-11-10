@@ -11,17 +11,25 @@ import {
   PackageCheck,
   XCircle,
   Loader2,
+  IndianRupee,
+  BellRing,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { cn, formatCurrency, formatDateTime, formatQty } from "@/lib/utils";
-import type { OrderStatus } from "@/types/database";
+import type { NotificationRecord, OrderStatus, PaymentStatus } from "@/types/database";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { useToast } from "@/components/ui/toast";
+import {
+  OrderPaymentModal,
+  parsePaymentClaimNotification,
+  type OrderPaymentTarget,
+  type PaymentPrefill,
+} from "@/components/admin/OrderPaymentModal";
 
 interface DailyOrderRow {
   id: string;
@@ -30,8 +38,10 @@ interface DailyOrderRow {
   subtotal: number;
   tax_total: number;
   total_amount: number;
+  paid_amount: number;
+  due_amount: number;
   order_status: OrderStatus;
-  payment_status: "unpaid" | "partially_paid" | "paid";
+  payment_status: PaymentStatus;
   placed_at: string;
   customers: { id: string; business_name: string; owner_name: string; phone: string } | null;
   order_items: {
@@ -64,6 +74,10 @@ export function DailyOperationsPage() {
   const [bucket, setBucket] = useState<OpBucket>("today");
   const [search, setSearch] = useState("");
   const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
+  const [paymentTarget, setPaymentTarget] = useState<{
+    order: OrderPaymentTarget;
+    prefill?: PaymentPrefill;
+  } | null>(null);
 
   const { data: orders = [], isLoading } = useQuery({
     queryKey: ["admin-daily-operations"],
@@ -71,13 +85,34 @@ export function DailyOperationsPage() {
       const { data, error } = await supabase
         .from("orders")
         .select(
-          "id, order_number, customer_id, subtotal, tax_total, total_amount, order_status, payment_status, placed_at, customers(id, business_name, owner_name, phone), order_items(id, quantity, product_name_snapshot, order_item_financials(manufacturer_id, manufacturer_name_snapshot, margin_amount_total)), purchase_orders(id, po_number, status, manufacturer_id)"
+          "id, order_number, customer_id, subtotal, tax_total, total_amount, paid_amount, due_amount, order_status, payment_status, placed_at, customers(id, business_name, owner_name, phone), order_items(id, quantity, product_name_snapshot, order_item_financials(manufacturer_id, manufacturer_name_snapshot, margin_amount_total)), purchase_orders(id, po_number, status, manufacturer_id)"
         )
         .order("placed_at", { ascending: false });
       if (error) throw error;
       return (data ?? []) as unknown as DailyOrderRow[];
     },
   });
+
+  const { data: paymentClaims = [], refetch: refetchClaims } = useQuery({
+    queryKey: ["admin-order-payment-claims"],
+    queryFn: async () => {
+      const { data } = await supabase
+        .from("notifications")
+        .select("*")
+        .in("recipient_role", ["admin", "staff"])
+        .eq("entity_type", "order_payment_claim")
+        .eq("is_read", false)
+        .order("created_at", { ascending: false })
+        .limit(8);
+      return (data ?? []) as NotificationRecord[];
+    },
+  });
+
+  const dismissClaim = async (notifId: string) => {
+    await supabase.from("notifications").update({ is_read: true }).eq("id", notifId);
+    refetchClaims();
+    queryClient.invalidateQueries({ queryKey: ["admin-notifications"] });
+  };
 
   const todayIso = new Date().toISOString().slice(0, 10);
 
@@ -165,13 +200,31 @@ export function DailyOperationsPage() {
     );
   });
 
+  const openPaymentForOrder = (o: DailyOrderRow, prefill?: PaymentPrefill) => {
+    const paidAmt = Number(o.paid_amount ?? 0);
+    const dueAmt = Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - paidAmt));
+    setPaymentTarget({
+      order: {
+        id: o.id,
+        order_number: o.order_number,
+        customer_name: o.customers?.business_name || "Customer",
+        total_amount: Number(o.total_amount),
+        paid_amount: paidAmt,
+        due_amount: dueAmt,
+        payment_status: o.payment_status,
+        order_status: o.order_status,
+      },
+      prefill,
+    });
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">Daily Operations</h1>
           <p className="text-sm text-slate-500">
-            Process incoming customer orders, split multi-manufacturer items into Purchase Orders, and dispatch deliveries.
+            Process incoming customer orders, split multi-manufacturer POs, track payment dues, and verify customer payment notices.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -189,6 +242,53 @@ export function DailyOperationsPage() {
           </Link>
         </div>
       </div>
+
+      {/* Customer Reported Payment Alerts */}
+      {paymentClaims.length > 0 && (
+        <Card className="border-amber-300 bg-amber-50/70">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm font-bold text-amber-950">
+              <BellRing className="h-4 w-4 text-amber-700" />
+              Customer Payment Notices ({paymentClaims.length}) — Pending Admin Verification
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {paymentClaims.map((claim) => {
+              const linkedOrder = orders.find((o) => o.id === claim.entity_id);
+              const parsed = parsePaymentClaimNotification(claim.message);
+              return (
+                <div
+                  key={claim.id}
+                  className="flex flex-col justify-between gap-2 rounded-md border border-amber-200 bg-white px-3.5 py-2.5 sm:flex-row sm:items-center"
+                >
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-slate-900">{claim.title}</p>
+                    <p className="text-xs text-slate-600">{claim.message}</p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {linkedOrder && linkedOrder.order_status !== "Cancelled" && (
+                      <Button size="sm" onClick={() => openPaymentForOrder(linkedOrder, parsed)}>
+                        Verify &amp; Apply Payment
+                      </Button>
+                    )}
+                    {claim.entity_id && (
+                      <Link
+                        to={`/admin/orders/${claim.entity_id}`}
+                        className="inline-flex h-8 items-center rounded-md border border-slate-200 px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        Open Order
+                      </Link>
+                    )}
+                    <Button variant="ghost" size="sm" onClick={() => dismissClaim(claim.id)}>
+                      Dismiss
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Operational Bucket Cards */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
@@ -237,7 +337,7 @@ export function DailyOperationsPage() {
                 <TableHead>Customer Business</TableHead>
                 <TableHead>Manufacturers Involved (Admin)</TableHead>
                 <TableHead>PO Coverage</TableHead>
-                <TableHead>Total / Margin</TableHead>
+                <TableHead>Total / Paid / Due</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Quick Operations</TableHead>
               </TableRow>
@@ -279,6 +379,8 @@ export function DailyOperationsPage() {
                   const poCount = o.purchase_orders?.length ?? 0;
                   const canSplit = o.order_status !== "Cancelled" && o.order_status !== "Delivered" && poCount < mfgNames.length;
                   const busy = busyOrderId === o.id;
+                  const paidAmt = Number(o.paid_amount ?? 0);
+                  const dueAmt = o.order_status === "Cancelled" ? 0 : Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - paidAmt));
 
                   return (
                     <TableRow key={o.id}>
@@ -316,13 +418,16 @@ export function DailyOperationsPage() {
                             {poCount} / {Math.max(1, mfgNames.length)} PO(s)
                           </span>
                         ) : (
-                          <span className="text-amber-700 font-medium">Needs PO</span>
+                          <span className="font-medium text-amber-700">Needs PO</span>
                         )}
                       </TableCell>
                       <TableCell>
                         <p className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</p>
-                        <p className="text-xs font-medium text-emerald-700">
-                          Margin: +{formatCurrency(totalMargin, sym)}
+                        <p className="text-[11px] text-emerald-700">
+                          Paid: {formatCurrency(paidAmt, sym)} &bull; +{formatCurrency(totalMargin, sym)} margin
+                        </p>
+                        <p className={cn("text-xs font-bold", dueAmt > 0 ? "text-red-700" : "text-slate-500")}>
+                          {o.order_status === "Cancelled" ? "Cancelled" : `Due: ${formatCurrency(dueAmt, sym)}`}
                         </p>
                       </TableCell>
                       <TableCell>
@@ -333,6 +438,17 @@ export function DailyOperationsPage() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                          {o.order_status !== "Cancelled" && (
+                            <Button
+                              size="sm"
+                              variant={dueAmt > 0 ? "default" : "outline"}
+                              disabled={busy}
+                              onClick={() => openPaymentForOrder(o)}
+                            >
+                              <IndianRupee className="h-3.5 w-3.5" />
+                              Payment
+                            </Button>
+                          )}
                           {o.order_status === "Pending" && (
                             <Button
                               size="sm"
@@ -391,6 +507,15 @@ export function DailyOperationsPage() {
           </Table>
         </CardContent>
       </Card>
+
+      <OrderPaymentModal
+        order={paymentTarget?.order ?? null}
+        prefill={paymentTarget?.prefill ?? null}
+        onClose={() => {
+          setPaymentTarget(null);
+          refetchClaims();
+        }}
+      />
     </div>
   );
 }

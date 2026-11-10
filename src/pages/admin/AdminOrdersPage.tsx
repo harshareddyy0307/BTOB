@@ -1,16 +1,18 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ShoppingBag, Search, Eye, ArrowRight } from "lucide-react";
+import { ShoppingBag, Search, Eye, ArrowRight, IndianRupee } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
-import { formatCurrency, formatDateTime, formatQty } from "@/lib/utils";
-import { ALL_ORDER_STATUSES, type OrderStatus } from "@/types/database";
+import { cn, formatCurrency, formatDateTime, formatQty } from "@/lib/utils";
+import { ALL_ORDER_STATUSES, type OrderStatus, type PaymentStatus } from "@/types/database";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/components/shared/StatusBadge";
+import { OrderPaymentModal, type OrderPaymentTarget } from "@/components/admin/OrderPaymentModal";
 
 interface AdminOrderListItem {
   id: string;
@@ -19,8 +21,10 @@ interface AdminOrderListItem {
   subtotal: number;
   tax_total: number;
   total_amount: number;
+  paid_amount: number;
+  due_amount: number;
   order_status: OrderStatus;
-  payment_status: "unpaid" | "partially_paid" | "paid";
+  payment_status: PaymentStatus;
   placed_at: string;
   customers: { id: string; business_name: string; gst_number: string | null } | null;
   order_items: {
@@ -45,6 +49,7 @@ export function AdminOrdersPage() {
   const [paymentFilter, setPaymentFilter] = useState("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [paymentOrder, setPaymentOrder] = useState<OrderPaymentTarget | null>(null);
 
   const { data: orders = [], isLoading } = useQuery({
     queryKey: ["admin-orders"],
@@ -52,13 +57,19 @@ export function AdminOrdersPage() {
       const { data, error } = await supabase
         .from("orders")
         .select(
-          "id, order_number, customer_id, subtotal, tax_total, total_amount, order_status, payment_status, placed_at, customers(id, business_name, gst_number), order_items(id, quantity, product_name_snapshot, order_item_financials(manufacturer_name_snapshot, margin_amount_total)), invoices(id, invoice_number), purchase_orders(id, po_number)"
+          "id, order_number, customer_id, subtotal, tax_total, total_amount, paid_amount, due_amount, order_status, payment_status, placed_at, customers(id, business_name, gst_number), order_items(id, quantity, product_name_snapshot, order_item_financials(manufacturer_name_snapshot, margin_amount_total)), invoices(id, invoice_number), purchase_orders(id, po_number)"
         )
         .order("placed_at", { ascending: false });
       if (error) throw error;
       return (data ?? []) as unknown as AdminOrderListItem[];
     },
   });
+
+  const activeOrders = orders.filter((o) => o.order_status !== "Cancelled");
+  const totalOrderValue = activeOrders.reduce((s, o) => s + Number(o.total_amount || 0), 0);
+  const totalPaidAmount = activeOrders.reduce((s, o) => s + Number(o.paid_amount || 0), 0);
+  const totalDueAmount = activeOrders.reduce((s, o) => s + Number(o.due_amount || 0), 0);
+  const unpaidOrPartialCount = activeOrders.filter((o) => o.payment_status !== "paid").length;
 
   const filtered = orders.filter((o) => {
     if (statusFilter !== "all" && o.order_status !== statusFilter) return false;
@@ -82,7 +93,7 @@ export function AdminOrdersPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">Order Management</h1>
           <p className="text-sm text-slate-500">
-            Centralized customer order ledger with manufacturer sourcing, PO splits, margin breakdown, and GST invoicing.
+            Track customer orders, mark payments as Paid / Unpaid / Partially Paid, and monitor exact Amount Due.
           </p>
         </div>
         <Link
@@ -92,6 +103,36 @@ export function AdminOrdersPage() {
           Daily Operations Queue
           <ArrowRight className="h-4 w-4" />
         </Link>
+      </div>
+
+      {/* Receivables & Collections Summary */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs font-medium text-slate-500">Active Order Value</p>
+            <p className="mt-1 text-2xl font-bold text-slate-900">{formatCurrency(totalOrderValue, sym)}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs font-medium text-slate-500">Total Paid Collected</p>
+            <p className="mt-1 text-2xl font-bold text-emerald-700">{formatCurrency(totalPaidAmount, sym)}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs font-medium text-slate-500">Total Amount Due</p>
+            <p className={cn("mt-1 text-2xl font-bold", totalDueAmount > 0 ? "text-red-700" : "text-emerald-700")}>
+              {formatCurrency(totalDueAmount, sym)}
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs font-medium text-slate-500">Unpaid / Partial Orders</p>
+            <p className="mt-1 text-2xl font-bold text-amber-700">{unpaidOrPartialCount}</p>
+          </CardContent>
+        </Card>
       </div>
 
       {/* Filters */}
@@ -152,8 +193,8 @@ export function AdminOrdersPage() {
                 <TableHead>Order #</TableHead>
                 <TableHead>Customer</TableHead>
                 <TableHead>Items / Qty</TableHead>
-                <TableHead>Total Sales</TableHead>
-                <TableHead>Est. Margin</TableHead>
+                <TableHead>Total / Margin</TableHead>
+                <TableHead>Paid / Amount Due</TableHead>
                 <TableHead>POs / Invoice</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Action</TableHead>
@@ -182,6 +223,8 @@ export function AdminOrdersPage() {
                     return s + Number(fin?.margin_amount_total ?? 0);
                   }, 0);
                   const inv = Array.isArray(o.invoices) ? o.invoices[0] : o.invoices;
+                  const paidAmt = Number(o.paid_amount ?? 0);
+                  const dueAmt = o.order_status === "Cancelled" ? 0 : Math.max(0, Number(o.due_amount ?? o.total_amount - paidAmt));
 
                   return (
                     <TableRow key={o.id}>
@@ -202,11 +245,17 @@ export function AdminOrdersPage() {
                       <TableCell className="text-xs text-slate-600">
                         {o.order_items.length} line(s) &bull; {formatQty(totalQty)} units
                       </TableCell>
-                      <TableCell className="font-semibold text-slate-900">
-                        {formatCurrency(o.total_amount, sym)}
+                      <TableCell>
+                        <p className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</p>
+                        <p className="text-xs font-semibold text-emerald-700">
+                          +{formatCurrency(totalMargin, sym)} margin
+                        </p>
                       </TableCell>
-                      <TableCell className="text-sm font-semibold text-emerald-700">
-                        +{formatCurrency(totalMargin, sym)}
+                      <TableCell>
+                        <p className="text-xs font-medium text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</p>
+                        <p className={cn("text-xs font-bold", dueAmt > 0 ? "text-red-700" : "text-slate-500")}>
+                          {o.order_status === "Cancelled" ? "Cancelled" : `Due: ${formatCurrency(dueAmt, sym)}`}
+                        </p>
                       </TableCell>
                       <TableCell className="text-xs">
                         <p className="text-slate-700">{o.purchase_orders?.length ?? 0} PO(s)</p>
@@ -219,13 +268,36 @@ export function AdminOrdersPage() {
                         </div>
                       </TableCell>
                       <TableCell className="text-right">
-                        <Link
-                          to={`/admin/orders/${o.id}`}
-                          className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                        >
-                          <Eye className="h-3.5 w-3.5" />
-                          Manage
-                        </Link>
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          {o.order_status !== "Cancelled" && (
+                            <Button
+                              size="sm"
+                              variant={dueAmt > 0 ? "default" : "outline"}
+                              onClick={() =>
+                                setPaymentOrder({
+                                  id: o.id,
+                                  order_number: o.order_number,
+                                  customer_name: o.customers?.business_name || "Customer",
+                                  total_amount: Number(o.total_amount),
+                                  paid_amount: paidAmt,
+                                  due_amount: dueAmt,
+                                  payment_status: o.payment_status,
+                                  order_status: o.order_status,
+                                })
+                              }
+                            >
+                              <IndianRupee className="h-3.5 w-3.5" />
+                              Payment
+                            </Button>
+                          )}
+                          <Link
+                            to={`/admin/orders/${o.id}`}
+                            className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            Manage
+                          </Link>
+                        </div>
                       </TableCell>
                     </TableRow>
                   );
@@ -235,6 +307,8 @@ export function AdminOrdersPage() {
           </Table>
         </CardContent>
       </Card>
+
+      <OrderPaymentModal order={paymentOrder} onClose={() => setPaymentOrder(null)} />
     </div>
   );
 }

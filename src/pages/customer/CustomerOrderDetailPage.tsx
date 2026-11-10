@@ -1,6 +1,7 @@
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, CheckCircle2, FileDown, MapPin, Package, Truck, XCircle } from "lucide-react";
+import { ArrowLeft, CheckCircle2, FileDown, IndianRupee, MapPin, Package, Truck, XCircle } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { generateCustomerInvoicePdf } from "@/lib/pdfGenerator";
@@ -17,11 +18,16 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/components/shared/StatusBadge";
+import {
+  CustomerPaymentNoticeDialog,
+  type CustomerNoticeOrderTarget,
+} from "@/components/customer/CustomerPaymentNoticeDialog";
 
 export function CustomerOrderDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { customerProfile, branding } = useAuth();
   const sym = branding.currency_symbol || "₹";
+  const [noticeOrder, setNoticeOrder] = useState<CustomerNoticeOrderTarget | null>(null);
 
   const { data: order, isLoading } = useQuery({
     queryKey: ["customer-order-detail", id],
@@ -88,7 +94,7 @@ export function CustomerOrderDetailPage() {
 
   if (!order) {
     return (
-      <div className="py-12 text-center space-y-3">
+      <div className="space-y-3 py-12 text-center">
         <p className="text-sm text-red-600">Order not found or access denied.</p>
         <Link to="/customer/orders" className="text-sm font-medium text-blue-700 hover:underline">
           Return to My Orders
@@ -100,6 +106,9 @@ export function CustomerOrderDetailPage() {
   const currentIdx = ORDER_STATUS_FLOW.indexOf(order.order_status);
   const isCancelled = order.order_status === "Cancelled";
   const addr = order.delivery_address;
+  const paidAmt = Number(order.paid_amount ?? 0);
+  const dueAmt = isCancelled ? 0 : Math.max(0, Number(order.due_amount ?? Number(order.total_amount) - paidAmt));
+  const recordedPayments = payments.filter((p) => p.status !== "voided");
 
   return (
     <div className="space-y-6">
@@ -108,15 +117,32 @@ export function CustomerOrderDetailPage() {
           <ArrowLeft className="h-4 w-4" />
           Back to My Orders
         </Link>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={order.order_status} />
           <StatusBadge status={order.payment_status} />
+          {dueAmt > 0 && !isCancelled && (
+            <Button
+              size="sm"
+              onClick={() =>
+                setNoticeOrder({
+                  id: order.id,
+                  order_number: order.order_number,
+                  total_amount: Number(order.total_amount),
+                  paid_amount: paidAmt,
+                  due_amount: dueAmt,
+                })
+              }
+            >
+              <IndianRupee className="h-3.5 w-3.5" />
+              Report Payment / UTR
+            </Button>
+          )}
         </div>
       </div>
 
       {/* Header & Order Stepper */}
       <Card>
-        <CardContent className="p-6 space-y-6">
+        <CardContent className="space-y-6 p-6">
           <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
             <div>
               <h1 className="text-2xl font-bold text-slate-900">{order.order_number}</h1>
@@ -124,9 +150,13 @@ export function CustomerOrderDetailPage() {
                 Placed on {formatDateTime(order.placed_at)} &bull; Last updated {formatDateTime(order.updated_at)}
               </p>
             </div>
-            <div className="text-left sm:text-right">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-left sm:text-right">
               <p className="text-xs font-medium uppercase text-slate-500">Order Grand Total</p>
               <p className="text-2xl font-bold text-slate-900">{formatCurrency(order.total_amount, sym)}</p>
+              <p className="text-xs font-medium text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</p>
+              <p className={cn("text-xs font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
+                {isCancelled ? "Cancelled" : `Amount Due: ${formatCurrency(dueAmt, sym)}`}
+              </p>
             </div>
           </div>
 
@@ -244,7 +274,7 @@ export function CustomerOrderDetailPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Summary &amp; GST Tax Invoice</CardTitle>
+            <CardTitle className="text-base">Summary, Due Balance &amp; GST Tax Invoice</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <div className="flex justify-between text-slate-600">
@@ -259,6 +289,36 @@ export function CustomerOrderDetailPage() {
               <span>Order Total</span>
               <span>{formatCurrency(order.total_amount, sym)}</span>
             </div>
+            <div className="flex justify-between text-sm text-emerald-700">
+              <span>Amount Paid</span>
+              <span className="font-semibold">{formatCurrency(paidAmt, sym)}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="font-semibold text-slate-800">Remaining Amount Due</span>
+              <span className={cn("font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
+                {formatCurrency(dueAmt, sym)}
+              </span>
+            </div>
+
+            {dueAmt > 0 && !isCancelled && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={() =>
+                  setNoticeOrder({
+                    id: order.id,
+                    order_number: order.order_number,
+                    total_amount: Number(order.total_amount),
+                    paid_amount: paidAmt,
+                    due_amount: dueAmt,
+                  })
+                }
+              >
+                <IndianRupee className="h-4 w-4" />
+                Already Paid? Notify Agency with UTR / Ref #
+              </Button>
+            )}
 
             {invoice ? (
               <div className="mt-4 space-y-3 rounded-lg border border-blue-200 bg-blue-50/50 p-4">
@@ -273,13 +333,6 @@ export function CustomerOrderDetailPage() {
                   <StatusBadge status={invoice.payment_status} />
                 </div>
 
-                <div className="flex justify-between text-xs text-slate-700">
-                  <span>Paid: {formatCurrency(invoice.paid_amount, sym)}</span>
-                  <span className="font-semibold text-red-700">
-                    Balance: {formatCurrency(Math.max(0, Number(invoice.total_amount) - Number(invoice.paid_amount)), sym)}
-                  </span>
-                </div>
-
                 {agency && customerProfile && (
                   <Button
                     size="sm"
@@ -291,7 +344,7 @@ export function CustomerOrderDetailPage() {
                         customer: customerProfile,
                         order,
                         items,
-                        payments,
+                        payments: recordedPayments,
                       })
                     }
                   >
@@ -302,12 +355,35 @@ export function CustomerOrderDetailPage() {
               </div>
             ) : (
               <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
-                Tax invoice has not been generated yet. Once the agency generates your invoice, you can download the PDF here or in the Invoices section.
+                Tax invoice has not been generated yet. Once the agency issues your invoice, you can download the PDF here or in the Invoices section.
+              </div>
+            )}
+
+            {recordedPayments.length > 0 && (
+              <div className="space-y-1.5 pt-2">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                  Recorded Payments ({recordedPayments.length})
+                </p>
+                <div className="divide-y divide-slate-100 rounded-md border border-slate-200">
+                  {recordedPayments.map((p) => (
+                    <div key={p.id} className="flex items-center justify-between px-3 py-2 text-xs">
+                      <div>
+                        <p className="font-medium text-slate-900">
+                          {p.payment_method} {p.reference_number ? `(${p.reference_number})` : ""}
+                        </p>
+                        <p className="text-[11px] text-slate-500">{formatDate(p.payment_date)}</p>
+                      </div>
+                      <span className="font-semibold text-emerald-700">{formatCurrency(p.amount, sym)}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </CardContent>
         </Card>
       </div>
+
+      <CustomerPaymentNoticeDialog order={noticeOrder} onClose={() => setNoticeOrder(null)} />
     </div>
   );
 }

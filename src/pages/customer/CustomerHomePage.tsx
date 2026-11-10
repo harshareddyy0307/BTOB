@@ -121,9 +121,17 @@ export function CustomerHomePage() {
                   <p className="text-sm font-semibold text-slate-900">{o.order_number}</p>
                   <p className="text-xs text-slate-500">Placed {formatDate(o.placed_at)}</p>
                 </div>
-                <div className="text-right space-y-1">
-                  <StatusBadge status={o.order_status} />
+                <div className="space-y-1 text-right">
+                  <div className="flex items-center justify-end gap-1.5">
+                    <StatusBadge status={o.order_status} />
+                    <StatusBadge status={o.payment_status} />
+                  </div>
                   <p className="text-xs font-semibold text-slate-800">{formatCurrency(o.total_amount)}</p>
+                  {Number(o.due_amount ?? Number(o.total_amount) - Number(o.paid_amount ?? 0)) > 0 && (
+                    <p className="text-[11px] font-semibold text-red-700">
+                      Due: {formatCurrency(Number(o.due_amount ?? Number(o.total_amount) - Number(o.paid_amount ?? 0)))}
+                    </p>
+                  )}
                 </div>
               </Link>
             ))}

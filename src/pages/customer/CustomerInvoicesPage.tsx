@@ -77,7 +77,7 @@ export function CustomerInvoicesPage() {
       customer: customerProfile,
       order: inv.orders,
       items: (items ?? []) as OrderItemRecord[],
-      payments: (payments ?? []) as PaymentRecord[],
+      payments: ((payments ?? []) as PaymentRecord[]).filter((p) => p.status !== "voided"),
     });
   };
 
@@ -225,12 +225,12 @@ export function CustomerInvoicesPage() {
               </TableHeader>
               <TableBody>
                 {paymentHistory.map((p) => (
-                  <TableRow key={p.id}>
+                  <TableRow key={p.id} className={p.status === "voided" ? "bg-slate-50 opacity-60 line-through" : undefined}>
                     <TableCell className="text-xs">{formatDate(p.payment_date)}</TableCell>
                     <TableCell className="text-xs font-medium">{p.payment_method}</TableCell>
                     <TableCell className="font-mono text-xs text-slate-600">{p.reference_number || "—"}</TableCell>
                     <TableCell className="text-right font-semibold text-emerald-700">
-                      {formatCurrency(p.amount, sym)}
+                      {p.status === "voided" ? "Voided" : formatCurrency(p.amount, sym)}
                     </TableCell>
                   </TableRow>
                 ))}

@@ -14,10 +14,12 @@ import {
   Search,
   Menu,
   X,
+  Bell,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
+import type { NotificationRecord } from "@/types/database";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
@@ -33,10 +35,11 @@ const CUSTOMER_NAV = [
 ];
 
 export function CustomerLayout() {
-  const { customerProfile, branding, signOut } = useAuth();
+  const { userProfile, customerProfile, branding, signOut } = useAuth();
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState("");
   const [mobileMenu, setMobileMenu] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
 
   const { data: cartCount = 0 } = useQuery({
     queryKey: ["customer-cart-count", customerProfile?.id],
@@ -50,6 +53,43 @@ export function CustomerLayout() {
       return count ?? 0;
     },
   });
+
+  const { data: notifications = [], refetch: refetchNotifs } = useQuery({
+    queryKey: ["customer-notifications", userProfile?.id],
+    enabled: Boolean(userProfile?.id),
+    queryFn: async () => {
+      const { data } = await supabase
+        .from("notifications")
+        .select("*")
+        .eq("recipient_user_id", userProfile!.id)
+        .order("created_at", { ascending: false })
+        .limit(12);
+      return (data ?? []) as NotificationRecord[];
+    },
+    refetchInterval: 15000,
+  });
+
+  const unreadCount = notifications.filter((n) => !n.is_read).length;
+
+  const markAllRead = async () => {
+    const unreadIds = notifications.filter((n) => !n.is_read).map((n) => n.id);
+    if (unreadIds.length === 0) return;
+    await supabase.from("notifications").update({ is_read: true }).in("id", unreadIds);
+    refetchNotifs();
+  };
+
+  const handleNotifClick = async (n: NotificationRecord) => {
+    if (!n.is_read) {
+      await supabase.from("notifications").update({ is_read: true }).eq("id", n.id);
+      refetchNotifs();
+    }
+    setNotifOpen(false);
+    if (n.entity_type === "order" && n.entity_id) {
+      navigate(`/customer/orders/${n.entity_id}`);
+    } else if (n.entity_type === "invoice") {
+      navigate("/customer/invoices");
+    }
+  };
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -101,7 +141,54 @@ export function CustomerLayout() {
             </div>
           </form>
 
-          <div className="flex items-center gap-3">
+          <div className="relative flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setNotifOpen((o) => !o)}
+              className="relative rounded-md border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-50"
+              title="Notifications"
+            >
+              <Bell className="h-4 w-4" />
+              {unreadCount > 0 && (
+                <span className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-600 px-1 text-[10px] font-bold text-white">
+                  {unreadCount}
+                </span>
+              )}
+            </button>
+
+            {notifOpen && (
+              <div className="absolute right-0 top-12 z-50 w-80 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
+                <div className="mb-2 flex items-center justify-between border-b border-slate-100 pb-2">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-slate-600">Updates</span>
+                  {unreadCount > 0 && (
+                    <button onClick={markAllRead} className="text-xs font-medium text-blue-700 hover:underline">
+                      Mark all read
+                    </button>
+                  )}
+                </div>
+                {notifications.length === 0 ? (
+                  <p className="py-6 text-center text-xs text-slate-500">No updates yet.</p>
+                ) : (
+                  <div className="max-h-72 space-y-2 overflow-y-auto">
+                    {notifications.map((n) => (
+                      <button
+                        key={n.id}
+                        type="button"
+                        onClick={() => handleNotifClick(n)}
+                        className={cn(
+                          "w-full rounded-md border p-2.5 text-left text-xs transition-colors hover:border-blue-300",
+                          n.is_read ? "border-slate-100 bg-white" : "border-blue-200 bg-blue-50/70"
+                        )}
+                      >
+                        <p className="font-semibold text-slate-900">{n.title}</p>
+                        <p className="mt-0.5 text-slate-600">{n.message}</p>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             <NavLink
               to="/customer/cart"
               className="relative inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
