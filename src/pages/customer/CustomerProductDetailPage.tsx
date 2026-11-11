@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Package, ShoppingCart, Loader2 } from "lucide-react";
@@ -21,6 +21,10 @@ export function CustomerProductDetailPage() {
   const [qty, setQty] = useState("1");
   const [selectedImg, setSelectedImg] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+
+  useEffect(() => {
+    setSelectedImg(null);
+  }, [id]);
 
   const { data: product, isLoading } = useQuery({
     queryKey: ["customer-product-detail", id],
@@ -90,13 +94,15 @@ export function CustomerProductDetailPage() {
               )}
             </div>
             {images.length > 1 && (
-              <div className="flex gap-2 overflow-x-auto">
+              <div className="flex gap-2 overflow-x-auto pb-1">
                 {images.map((url) => (
                   <button
                     key={url}
                     type="button"
                     onClick={() => setSelectedImg(url)}
-                    className="h-16 w-16 shrink-0 overflow-hidden rounded border hover:border-blue-500"
+                    className={`h-16 w-16 shrink-0 overflow-hidden rounded border transition-all ${
+                      mainImg === url ? "border-blue-600 ring-2 ring-blue-200" : "hover:border-blue-400"
+                    }`}
                   >
                     <img src={url} alt="" className="h-full w-full object-cover" />
                   </button>

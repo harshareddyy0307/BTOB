@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Plus, Package, Pencil, Copy, Trash2, Globe, GlobeLock } from "lucide-react";
+import { Plus, Package, Pencil, Copy, Trash2, Globe, GlobeLock, Camera } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { formatCurrency, formatQty } from "@/lib/utils";
 import type { AdminProduct, Category, Manufacturer } from "@/types/database";
@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { ProductFormDialog } from "@/components/admin/ProductFormDialog";
+import { ProductPhotoDialog, sortProductImages } from "@/components/admin/ProductPhotoDialog";
 import { useToast } from "@/components/ui/toast";
 
 export function ProductCatalogPage() {
@@ -29,6 +30,7 @@ export function ProductCatalogPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<AdminProduct | null>(null);
   const [duplicateMode, setDuplicateMode] = useState(false);
+  const [photoProduct, setPhotoProduct] = useState<AdminProduct | null>(null);
 
   const { data: categories = [] } = useQuery({
     queryKey: ["admin-categories"],
@@ -259,19 +261,38 @@ export function ProductCatalogPage() {
                   const avail = Number(p.inventory?.available_quantity ?? 0);
                   const thresh = Number(p.inventory?.low_stock_threshold ?? 10);
                   const stockStat = avail <= 0 ? "out_of_stock" : avail <= thresh ? "low_stock" : "in_stock";
-                  const thumb = p.product_images?.find((i) => i.is_primary)?.image_url || p.product_images?.[0]?.image_url;
+                  const sortedPhotos = sortProductImages(p.product_images);
+                  const thumb = sortedPhotos[0]?.image_url;
 
                   return (
                     <TableRow key={p.id}>
                       <TableCell>
                         <div className="flex items-center gap-3">
-                          {thumb ? (
-                            <img src={thumb} alt={p.name} className="h-10 w-10 rounded border object-cover" />
-                          ) : (
-                            <div className="flex h-10 w-10 items-center justify-center rounded border bg-slate-100 text-[10px] font-bold text-slate-500">
-                              IMG
-                            </div>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => setPhotoProduct(p)}
+                            title={thumb ? "Manage product photos" : "Add product photo"}
+                            className="group relative h-11 w-11 shrink-0 overflow-hidden rounded-md border bg-slate-50 transition-colors hover:border-blue-500"
+                          >
+                            {thumb ? (
+                              <>
+                                <img src={thumb} alt={p.name} className="h-full w-full object-cover" />
+                                <span className="absolute inset-0 flex items-center justify-center bg-slate-900/45 text-white opacity-0 transition-opacity group-hover:opacity-100">
+                                  <Camera className="h-3.5 w-3.5" />
+                                </span>
+                                {sortedPhotos.length > 1 && (
+                                  <span className="absolute bottom-0.5 right-0.5 rounded bg-slate-900/80 px-1 text-[9px] font-semibold text-white">
+                                    +{sortedPhotos.length - 1}
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              <span className="flex h-full w-full flex-col items-center justify-center gap-0.5 border border-dashed border-slate-300 text-[9px] font-medium text-slate-500 group-hover:border-blue-400 group-hover:text-blue-700">
+                                <Camera className="h-3.5 w-3.5" />
+                                <span>Photo</span>
+                              </span>
+                            )}
+                          </button>
                           <div>
                             <p className="font-medium text-slate-900">{p.name}</p>
                             <p className="font-mono text-xs text-slate-500">{p.sku}</p>
@@ -305,6 +326,16 @@ export function ProductCatalogPage() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="inline-flex items-center gap-1">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 shrink-0 whitespace-nowrap px-2 text-xs"
+                            onClick={() => setPhotoProduct(p)}
+                            title={sortedPhotos.length > 0 ? "Manage Photos" : "Add Photo"}
+                          >
+                            <Camera className="h-3.5 w-3.5 text-blue-700" />
+                            <span>{sortedPhotos.length > 0 ? `Photos (${sortedPhotos.length})` : "Add Photo"}</span>
+                          </Button>
                           <Button
                             variant="ghost"
                             size="icon"
@@ -365,6 +396,15 @@ export function ProductCatalogPage() {
         duplicateMode={duplicateMode}
         manufacturers={manufacturers}
         categories={categories}
+        onSaved={() => queryClient.invalidateQueries({ queryKey: ["admin-all-products"] })}
+      />
+
+      <ProductPhotoDialog
+        open={Boolean(photoProduct)}
+        onOpenChange={(open) => {
+          if (!open) setPhotoProduct(null);
+        }}
+        product={photoProduct}
         onSaved={() => queryClient.invalidateQueries({ queryKey: ["admin-all-products"] })}
       />
     </div>
