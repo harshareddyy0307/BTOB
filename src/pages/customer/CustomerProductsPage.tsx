@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/contexts/AuthContext";
 import type { Category, CustomerCatalogProduct } from "@/types/database";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -9,6 +10,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { CustomerProductCard } from "@/components/customer/CustomerProductCard";
 
 export function CustomerProductsPage() {
+  const { customerProfile } = useAuth();
   const [searchParams] = useSearchParams();
   const [search, setSearch] = useState(searchParams.get("q") || "");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -23,7 +25,8 @@ export function CustomerProductsPage() {
   });
 
   const { data: products = [], isLoading } = useQuery({
-    queryKey: ["customer-all-products"],
+    queryKey: ["customer-all-products", customerProfile?.id],
+    enabled: Boolean(customerProfile?.id),
     queryFn: async () => {
       const { data, error } = await supabase.from("v_customer_catalog").select("*").order("name");
       if (error) throw error;

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { ShieldCheck, Building2, Lock, AlertTriangle, Loader2, Store, ArrowRight } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
@@ -29,6 +29,7 @@ export function LoginPage() {
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hasNavigatedRef = useRef(false);
 
   // Initial agency owner setup state (only available when zero admin accounts exist)
   const [agencyName, setAgencyName] = useState("TradeBridge B2B Supply Agency");
@@ -42,10 +43,11 @@ export function LoginPage() {
   }, [searchParams, fromPath]);
 
   useEffect(() => {
-    if (!authLoading && role) {
+    if (!authLoading && role && !submitting && !hasNavigatedRef.current) {
+      hasNavigatedRef.current = true;
       navigate(role === "customer" ? "/customer/home" : "/admin/dashboard", { replace: true });
     }
-  }, [authLoading, role, navigate]);
+  }, [authLoading, role, submitting, navigate]);
 
   const handlePortalTabChange = (value: string) => {
     setPortalTab(value === "admin" ? "admin" : "customer");
@@ -55,15 +57,18 @@ export function LoginPage() {
   const handleCustomerLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    hasNavigatedRef.current = false;
     setSubmitting(true);
     const res = await signInCustomer(customerIdentifier);
-    setSubmitting(false);
 
     if (res.error) {
+      setSubmitting(false);
       setError(res.error);
       return;
     }
 
+    hasNavigatedRef.current = true;
+    setSubmitting(false);
     const target = fromPath && fromPath.startsWith("/customer") ? `${fromPath}${fromState?.from?.search ?? ""}` : "/customer/home";
     navigate(target, { replace: true });
   };
@@ -71,15 +76,18 @@ export function LoginPage() {
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    hasNavigatedRef.current = false;
     setSubmitting(true);
     const res = await signIn(email, password);
-    setSubmitting(false);
 
     if (res.error) {
+      setSubmitting(false);
       setError(res.error);
       return;
     }
 
+    hasNavigatedRef.current = true;
+    setSubmitting(false);
     if (res.role === "customer") {
       navigate("/customer/home", { replace: true });
       return;

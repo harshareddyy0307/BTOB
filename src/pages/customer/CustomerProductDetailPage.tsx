@@ -27,8 +27,8 @@ export function CustomerProductDetailPage() {
   }, [id]);
 
   const { data: product, isLoading } = useQuery({
-    queryKey: ["customer-product-detail", id],
-    enabled: Boolean(id),
+    queryKey: ["customer-product-detail", id, customerProfile?.id],
+    enabled: Boolean(id && customerProfile?.id),
     queryFn: async () => {
       const { data, error } = await supabase.from("v_customer_catalog").select("*").eq("id", id!).single();
       if (error) throw error;
@@ -124,10 +124,17 @@ export function CustomerProductDetailPage() {
             </div>
 
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-              <p className="text-3xl font-bold text-slate-900">
-                {formatCurrency(product.selling_price)}
-                <span className="text-sm font-normal text-slate-500"> / {product.unit_of_measurement}</span>
-              </p>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <p className="text-3xl font-bold text-slate-900">
+                  {formatCurrency(product.selling_price)}
+                  <span className="text-sm font-normal text-slate-500"> / {product.unit_of_measurement}</span>
+                </p>
+                {product.has_custom_price && (
+                  <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                    Contract Price
+                  </span>
+                )}
+              </div>
               <p className="mt-1 text-xs text-slate-500">
                 Applicable GST: {product.gst_rate}% {product.hsn_code ? `• HSN: ${product.hsn_code}` : ""}
               </p>

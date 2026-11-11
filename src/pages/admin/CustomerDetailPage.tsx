@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Plus, Trash2, Loader2, IndianRupee, Power } from "lucide-react";
 import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
+import { invalidateCatalogQueries } from "@/lib/productPublishing";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import type { AdminProduct, CustomerProfile, InvoiceRecord, OrderRecord } from "@/types/database";
 import { Button } from "@/components/ui/button";
@@ -108,6 +109,7 @@ export function CustomerDetailPage() {
       setSelectedProdId("");
       setCustomPrice("");
       queryClient.invalidateQueries({ queryKey: ["admin-customer-custom-prices", id] });
+      void invalidateCatalogQueries(queryClient);
     } catch (err) {
       toast({ title: "Could not save price override", description: err instanceof Error ? err.message : "Error", type: "error" });
     } finally {
@@ -118,6 +120,7 @@ export function CustomerDetailPage() {
   const removeCustomPrice = async (rowId: string) => {
     await supabase.from("customer_product_prices").delete().eq("id", rowId);
     queryClient.invalidateQueries({ queryKey: ["admin-customer-custom-prices", id] });
+    void invalidateCatalogQueries(queryClient);
     toast({ title: "Custom price removed", type: "info" });
   };
 

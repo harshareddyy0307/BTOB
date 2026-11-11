@@ -1,4 +1,5 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import type { Session } from "@supabase/supabase-js";
 import { extractEdgeFunctionError, isSupabaseConfigured, supabase } from "@/lib/supabase";
 import type { AppUser, CustomerProfile, UserRole } from "@/types/database";
@@ -17,6 +18,7 @@ interface AuthContextValue {
   role: UserRole | null;
   branding: PublicBranding;
   loading: boolean;
+  suppressReturnTo: boolean;
   signIn: (identifier: string, password: string) => Promise<{ error: string | null; role?: UserRole | null }>;
   signInCustomer: (identifier: string) => Promise<{ error: string | null; role?: UserRole | null }>;
   signOut: () => Promise<void>;
@@ -34,11 +36,14 @@ const DEFAULT_BRANDING: PublicBranding = {
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const queryClient = useQueryClient();
+  const activeUserIdRef = useRef<string | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [userProfile, setUserProfile] = useState<AppUser | null>(null);
   const [customerProfile, setCustomerProfile] = useState<CustomerProfile | null>(null);
   const [branding, setBranding] = useState<PublicBranding>(DEFAULT_BRANDING);
   const [loading, setLoading] = useState(true);
+  const [suppressReturnTo, setSuppressReturnTo] = useState(false);
 
   const refreshBranding = useCallback(async () => {
     if (!isSupabaseConfigured) return;
@@ -146,6 +151,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (isHardAuthFailure(userErr) || isHardAuthFailure(refErr) || isHardAuthFailure(retryErr)) {
         await supabase.auth.signOut({ scope: "local" });
+        activeUserIdRef.current = null;
+        queryClient.clear();
         if (mounted) {
           setSession(null);
           setUserProfile(null);
@@ -189,6 +196,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         lastVerifyAt = Date.now();
         if (!mounted) return;
+        const initUid = activeSession?.user?.id ?? null;
+        if (activeUserIdRef.current !== initUid) {
+          queryClient.clear();
+          activeUserIdRef.current = initUid;
+        }
         setSession(activeSession);
         if (activeSession?.user) {
           await loadUserDetails(activeSession.user.id);
@@ -221,6 +233,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Wait for init() to verify the stored session against Supabase Auth
         return;
       }
+      const nextUid = nextSession?.user?.id ?? null;
+      if (nextUid) {
+        setSuppressReturnTo(false);
+      }
+      if (activeUserIdRef.current !== nextUid) {
+        queryClient.clear();
+        activeUserIdRef.current = nextUid;
+      }
       setSession(nextSession);
       if (nextSession?.user) {
         await loadUserDetails(nextSession.user.id);
@@ -237,7 +257,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       subscription.unsubscribe();
     };
-  }, [loadUserDetails, refreshBranding]);
+  }, [loadUserDetails, refreshBranding, queryClient]);
 
   const signIn = async (identifier: string, password: string) => {
     if (!isSupabaseConfigured) {
@@ -273,9 +293,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       authedUserId = sessData.user.id;
     }
 
+    if (activeUserIdRef.current !== authedUserId) {
+      queryClient.clear();
+      activeUserIdRef.current = authedUserId;
+    }
+    setSuppressReturnTo(false);
+
     const role = await loadUserDetails(authedUserId);
     if (!role) {
       await supabase.auth.signOut({ scope: "local" });
+      activeUserIdRef.current = null;
+      queryClient.clear();
       return { error: "Your account is inactive or lacks an assigned portal role." };
     }
     return { error: null, role };
@@ -310,9 +338,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return { error: sessErr?.message || "Failed to initialize customer portal session." };
     }
 
+    if (activeUserIdRef.current !== sessData.user.id) {
+      queryClient.clear();
+      activeUserIdRef.current = sessData.user.id;
+    }
+    setSuppressReturnTo(false);
+
     const role = await loadUserDetails(sessData.user.id);
     if (role !== "customer") {
       await supabase.auth.signOut({ scope: "local" });
+      activeUserIdRef.current = null;
+      queryClient.clear();
       return { error: "Your customer portal account is inactive or unavailable." };
     }
 
@@ -320,7 +356,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signOut = async () => {
+    setSuppressReturnTo(true);
     await supabase.auth.signOut({ scope: "local" });
+    activeUserIdRef.current = null;
+    queryClient.clear();
     setSession(null);
     setUserProfile(null);
     setCustomerProfile(null);
@@ -335,6 +374,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         role: userProfile?.role ?? null,
         branding,
         loading,
+        suppressReturnTo,
         signIn,
         signInCustomer,
         signOut,

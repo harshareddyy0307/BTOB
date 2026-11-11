@@ -32,7 +32,8 @@ export function CustomerHomePage() {
   });
 
   const { data: catalog = [] } = useQuery({
-    queryKey: ["customer-home-catalog"],
+    queryKey: ["customer-home-catalog", customerProfile?.id],
+    enabled: Boolean(customerProfile?.id),
     queryFn: async () => {
       const { data } = await supabase
         .from("v_customer_catalog")

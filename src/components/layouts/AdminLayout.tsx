@@ -89,7 +89,7 @@ export function AdminLayout() {
 
   const handleSignOut = async () => {
     await signOut();
-    navigate("/login");
+    navigate("/login?portal=admin", { replace: true });
   };
 
   return (

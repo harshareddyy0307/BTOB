@@ -2,12 +2,14 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, LayoutGrid } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/contexts/AuthContext";
 import type { Category, CustomerCatalogProduct } from "@/types/database";
 import { Card, CardContent } from "@/components/ui/card";
 import { CustomerProductCard } from "@/components/customer/CustomerProductCard";
 
 export function CustomerCategoriesPage() {
   const { id } = useParams<{ id: string }>();
+  const { customerProfile } = useAuth();
 
   const { data: categories = [], isLoading: loadingCats } = useQuery({
     queryKey: ["customer-all-categories"],
@@ -26,8 +28,8 @@ export function CustomerCategoriesPage() {
   const subCategoryIds = id ? categories.filter((c) => c.parent_id === id).map((c) => c.id) : [];
 
   const { data: products = [], isLoading: loadingProds } = useQuery({
-    queryKey: ["customer-category-products", id, subCategoryIds.join(",")],
-    enabled: Boolean(id),
+    queryKey: ["customer-category-products", id, subCategoryIds.join(","), customerProfile?.id],
+    enabled: Boolean(id && customerProfile?.id),
     queryFn: async () => {
       const targetIds = [id!, ...subCategoryIds];
       const { data } = await supabase

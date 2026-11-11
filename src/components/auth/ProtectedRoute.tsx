@@ -12,7 +12,7 @@ interface ProtectedRouteProps {
 }
 
 export function ProtectedRoute({ allowedRoles, children }: ProtectedRouteProps) {
-  const { session, role, customerProfile, loading, signOut } = useAuth();
+  const { session, role, customerProfile, loading, suppressReturnTo, signOut } = useAuth();
   const location = useLocation();
 
   if (loading) {
@@ -27,7 +27,8 @@ export function ProtectedRoute({ allowedRoles, children }: ProtectedRouteProps) 
   }
 
   if (!session || !role) {
-    return <Navigate to="/login" state={{ from: location }} replace />;
+    const loginPath = suppressReturnTo && location.pathname.startsWith("/admin") ? "/login?portal=admin" : "/login";
+    return <Navigate to={loginPath} state={suppressReturnTo ? undefined : { from: location }} replace />;
   }
 
   if (!allowedRoles.includes(role)) {

@@ -30,7 +30,7 @@ export function CustomerOrderDetailPage() {
   const [noticeOrder, setNoticeOrder] = useState<CustomerNoticeOrderTarget | null>(null);
 
   const { data: order, isLoading } = useQuery({
-    queryKey: ["customer-order-detail", id],
+    queryKey: ["customer-order-detail", id, customerProfile?.id],
     enabled: Boolean(id && customerProfile?.id),
     queryFn: async () => {
       const { data, error } = await supabase
@@ -45,8 +45,8 @@ export function CustomerOrderDetailPage() {
   });
 
   const { data: items = [] } = useQuery({
-    queryKey: ["customer-order-items", id],
-    enabled: Boolean(id),
+    queryKey: ["customer-order-items", id, customerProfile?.id],
+    enabled: Boolean(id && customerProfile?.id),
     queryFn: async () => {
       const { data, error } = await supabase
         .from("order_items")
@@ -59,8 +59,8 @@ export function CustomerOrderDetailPage() {
   });
 
   const { data: invoice } = useQuery({
-    queryKey: ["customer-order-invoice", id],
-    enabled: Boolean(id),
+    queryKey: ["customer-order-invoice", id, customerProfile?.id],
+    enabled: Boolean(id && customerProfile?.id),
     queryFn: async () => {
       const { data } = await supabase.from("invoices").select("*").eq("order_id", id!).maybeSingle();
       return (data as InvoiceRecord | null) ?? null;
