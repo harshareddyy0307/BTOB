@@ -18,10 +18,17 @@ import {
   MapPin,
   Percent,
   Camera,
+  RefreshCw,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
-import { bulkPublishProducts, bulkUnpublishProducts, invalidateCatalogQueries } from "@/lib/productPublishing";
+import {
+  bulkPublishProducts,
+  bulkUnpublishProducts,
+  bulkUpdatePublishedPrices,
+  invalidateCatalogQueries,
+} from "@/lib/productPublishing";
+import { isPublishedWithPendingPrice } from "@/lib/pricing";
 import { getManufacturerAssetSignedUrl, uploadStorageFile } from "@/lib/storage";
 import { formatCurrency, formatQty } from "@/lib/utils";
 import type { AdminProduct, Category, Manufacturer } from "@/types/database";
@@ -49,7 +56,7 @@ export function ManufacturerDetailPage() {
   const [editingProduct, setEditingProduct] = useState<AdminProduct | null>(null);
   const [duplicateMode, setDuplicateMode] = useState(false);
   const [photoProduct, setPhotoProduct] = useState<AdminProduct | null>(null);
-  const [bulkPublishAction, setBulkPublishAction] = useState<"publish" | "unpublish" | null>(null);
+  const [bulkPublishAction, setBulkPublishAction] = useState<"publish" | "update_live" | "unpublish" | null>(null);
 
   const [galleryUrls, setGalleryUrls] = useState<string[]>([]);
   const [uploadingPhotos, setUploadingPhotos] = useState(false);
@@ -155,19 +162,20 @@ export function ManufacturerDetailPage() {
             ? Math.max(0, Math.round(currentPrice * (1 + val / 100) * 100) / 100)
             : Math.max(0, Math.round((currentPrice + val) * 100) / 100);
 
-        await supabase.rpc("recalculate_product_draft_price", {
+        const { error: priceErr } = await supabase.rpc("recalculate_product_draft_price", {
           p_product_id: p.id,
           p_new_manufacturer_price: nextPrice,
           p_notes: `Bulk manufacturer price update (${bulkMode}: ${val})`,
         });
+        if (priceErr) throw priceErr;
       }
       toast({
         title: "Manufacturer prices updated",
-        description: `Recalculated ${filteredProducts.length} product(s). Review & publish in Margin & Pricing.`,
+        description: `Recalculated ${filteredProducts.length} product(s). Review & publish or update live prices.`,
         type: "success",
       });
       setBulkPriceOpen(false);
-      queryClient.invalidateQueries({ queryKey: ["admin-manufacturer-products", id] });
+      await invalidateCatalogQueries(queryClient);
     } catch (err) {
       toast({ title: "Bulk update failed", description: err instanceof Error ? err.message : "Error", type: "error" });
     } finally {
@@ -241,24 +249,29 @@ export function ManufacturerDetailPage() {
         if (error || !created) continue;
 
         const stockQty = Math.max(0, Number(r.available_quantity) || 0);
-        await supabase.from("inventory").upsert({
-          product_id: created.id,
-          available_quantity: stockQty,
-          low_stock_threshold: 10,
-        });
+        const { error: invErr } = await supabase.from("inventory").upsert(
+          {
+            product_id: created.id,
+            available_quantity: stockQty,
+            low_stock_threshold: 10,
+          },
+          { onConflict: "product_id" }
+        );
+        if (invErr) throw invErr;
 
-        await supabase.rpc("recalculate_product_draft_price", {
+        const { error: priceErr } = await supabase.rpc("recalculate_product_draft_price", {
           p_product_id: created.id,
           p_new_manufacturer_price: Math.max(0, Number(r.manufacturer_price) || 0),
           p_notes: "Imported from Excel sheet",
         });
+        if (priceErr) throw priceErr;
 
         importedCount++;
       }
 
       toast({ title: `Imported ${importedCount} product(s)`, type: "success" });
       setImportOpen(false);
-      queryClient.invalidateQueries({ queryKey: ["admin-manufacturer-products", id] });
+      await invalidateCatalogQueries(queryClient);
     } catch (err) {
       toast({ title: "Import failed", description: err instanceof Error ? err.message : "Invalid file", type: "error" });
     } finally {
@@ -318,6 +331,38 @@ export function ManufacturerDetailPage() {
     }
   };
 
+  const handleUpdatePublishedPrices = async () => {
+    if (mfgLivePriceUpdateTargets.length === 0) return;
+    setBulkPublishAction("update_live");
+    try {
+      const { updatedCount, skippedZeroPriceCount } = await bulkUpdatePublishedPrices(filteredProducts, queryClient);
+      if (updatedCount === 0 && skippedZeroPriceCount > 0) {
+        toast({
+          title: "Cannot update ₹0 price products",
+          description: `${skippedZeroPriceCount} published product(s) have a ₹0 draft selling price.`,
+          type: "error",
+        });
+        return;
+      }
+      toast({
+        title: `Updated live selling prices for ${updatedCount} published product(s)`,
+        description:
+          skippedZeroPriceCount > 0
+            ? `Skipped ${skippedZeroPriceCount} ₹0-price item(s). Draft products remain unpublished.`
+            : "Customer Portal now shows the updated prices for published products.",
+        type: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Failed to update published prices",
+        description: err instanceof Error ? err.message : "Error",
+        type: "error",
+      });
+    } finally {
+      setBulkPublishAction(null);
+    }
+  };
+
   const handleUnpublishAllManufacturerProducts = async () => {
     if (mfgPublishedTargets.length === 0) return;
     setBulkPublishAction("unpublish");
@@ -342,7 +387,7 @@ export function ManufacturerDetailPage() {
       return;
     }
     toast({ title: "Product deleted", type: "success" });
-    queryClient.invalidateQueries({ queryKey: ["admin-manufacturer-products", id] });
+    void invalidateCatalogQueries(queryClient);
   };
 
   const filteredProducts = products.filter((p) => {
@@ -355,6 +400,7 @@ export function ManufacturerDetailPage() {
   const hasActiveMfgFilters = Boolean(search.trim()) || catFilter !== "all";
   const mfgDraftTargets = filteredProducts.filter((p) => !p.is_published);
   const mfgPublishedTargets = filteredProducts.filter((p) => p.is_published);
+  const mfgLivePriceUpdateTargets = filteredProducts.filter((p) => isPublishedWithPendingPrice(p));
 
   if (loadingMfg) {
     return <div className="py-12 text-center text-sm text-slate-500">Loading manufacturer profile...</div>;
@@ -471,6 +517,24 @@ export function ManufacturerDetailPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {mfgLivePriceUpdateTargets.length > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="border-blue-200 text-blue-700 hover:bg-blue-50 hover:text-blue-800"
+                disabled={bulkPublishAction !== null}
+                onClick={handleUpdatePublishedPrices}
+                title="Update live Customer Portal prices for published products without publishing Draft items"
+              >
+                {bulkPublishAction === "update_live" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                {`Update Published Prices (${mfgLivePriceUpdateTargets.length})`}
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -629,11 +693,18 @@ export function ManufacturerDetailPage() {
                         {formatCurrency(p.product_prices?.draft_margin_amount ?? 0)})
                       </TableCell>
                       <TableCell className="font-semibold text-blue-700">
-                        {formatCurrency(p.product_prices?.draft_selling_price ?? 0)}
-                        {p.product_prices?.approval_status === "pending_review" && (
-                          <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
-                            Draft
-                          </span>
+                        <div>
+                          <span>{formatCurrency(p.product_prices?.draft_selling_price ?? 0)}</span>
+                          {p.product_prices?.approval_status === "pending_review" && (
+                            <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
+                              Draft
+                            </span>
+                          )}
+                        </div>
+                        {isPublishedWithPendingPrice(p) && (
+                          <p className="text-[11px] font-normal text-slate-500">
+                            Live: {formatCurrency(p.product_prices?.published_selling_price ?? 0)}
+                          </p>
                         )}
                       </TableCell>
                       <TableCell>
@@ -724,10 +795,7 @@ export function ManufacturerDetailPage() {
         fixedManufacturerId={id}
         manufacturers={[manufacturer]}
         categories={categories}
-        onSaved={() => {
-          queryClient.invalidateQueries({ queryKey: ["admin-manufacturer-products", id] });
-          queryClient.invalidateQueries({ queryKey: ["admin-all-products"] });
-        }}
+        onSaved={() => void invalidateCatalogQueries(queryClient)}
       />
 
       <ProductPhotoDialog
@@ -736,10 +804,7 @@ export function ManufacturerDetailPage() {
           if (!open) setPhotoProduct(null);
         }}
         product={photoProduct}
-        onSaved={() => {
-          queryClient.invalidateQueries({ queryKey: ["admin-manufacturer-products", id] });
-          queryClient.invalidateQueries({ queryKey: ["admin-all-products"] });
-        }}
+        onSaved={() => void invalidateCatalogQueries(queryClient)}
       />
 
       {/* Bulk Price Update Dialog */}

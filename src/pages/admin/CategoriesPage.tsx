@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Trash2, FolderTree, Upload, Loader2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { invalidateCatalogQueries } from "@/lib/productPublishing";
 import { uploadStorageFile } from "@/lib/storage";
 import { slugify } from "@/lib/utils";
 import type { Category } from "@/types/database";
@@ -103,9 +104,20 @@ export function CategoriesPage() {
         if (payload.parent_id === editing.id) {
           throw new Error("A category cannot be its own parent.");
         }
+        const parentChanged = (editing.parent_id ?? null) !== payload.parent_id;
         const { error } = await supabase.from("categories").update(payload).eq("id", editing.id);
         if (error) throw error;
-        toast({ title: "Category updated", type: "success" });
+        if (parentChanged) {
+          const { error: recalcErr } = await supabase.rpc("recalculate_category_products_draft_price", {
+            p_category_id: editing.id,
+          });
+          if (recalcErr) throw recalcErr;
+        }
+        toast({
+          title: "Category updated",
+          description: parentChanged ? "Recalculated draft prices under the updated category hierarchy." : undefined,
+          type: "success",
+        });
       } else {
         const { error } = await supabase.from("categories").insert(payload);
         if (error) throw error;
@@ -113,7 +125,11 @@ export function CategoriesPage() {
       }
 
       setModalOpen(false);
-      queryClient.invalidateQueries({ queryKey: ["admin-categories"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["admin-categories"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-margin-rules"] }),
+        invalidateCatalogQueries(queryClient),
+      ]);
     } catch (err) {
       toast({ title: "Could not save category", description: err instanceof Error ? err.message : "Error", type: "error" });
     } finally {
@@ -131,7 +147,11 @@ export function CategoriesPage() {
       return;
     }
     toast({ title: "Category deleted", type: "success" });
-    queryClient.invalidateQueries({ queryKey: ["admin-categories"] });
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["admin-categories"] }),
+      queryClient.invalidateQueries({ queryKey: ["admin-margin-rules"] }),
+      invalidateCatalogQueries(queryClient),
+    ]);
   };
 
   const filtered = categories.filter((c) => c.name.toLowerCase().includes(search.toLowerCase()));

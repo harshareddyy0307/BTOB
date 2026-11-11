@@ -15,7 +15,8 @@ import {
 } from "recharts";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
-import { formatCurrency, formatDate, formatQty } from "@/lib/utils";
+import { formatSignedCurrency } from "@/lib/pricing";
+import { cn, formatCurrency, formatDate, formatQty } from "@/lib/utils";
 import type { AdminProduct, CustomerProfile, InvoiceRecord, PurchaseOrderRecord } from "@/types/database";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -250,14 +251,15 @@ export function ReportsPage() {
       cEntry.total_ordered += Number(o.total_amount);
       custOrderMap.set(o.customer_id, cEntry);
 
+      const sellingTotal = Number(o.subtotal);
       grossMarginRows.push({
         order_number: o.order_number,
         date: dayKey,
         customer: bName,
-        selling_total: Number(o.subtotal),
+        selling_total: sellingTotal,
         mfg_cost: Math.round(orderMfgCost * 100) / 100,
         gross_margin: Math.round(orderMargin * 100) / 100,
-        margin_pct: orderMfgCost > 0 ? Math.round((orderMargin / orderMfgCost) * 1000) / 10 : 0,
+        margin_pct: sellingTotal > 0 ? Math.round((orderMargin / sellingTotal) * 1000) / 10 : 0,
       });
     }
 
@@ -572,8 +574,8 @@ export function ReportsPage() {
                           <TableCell>{formatCurrency(r.subtotal, sym)}</TableCell>
                           <TableCell>{formatCurrency(r.gst, sym)}</TableCell>
                           <TableCell className="font-semibold">{formatCurrency(r.total_sales, sym)}</TableCell>
-                          <TableCell className="text-right font-semibold text-emerald-700">
-                            {formatCurrency(r.gross_margin, sym)}
+                          <TableCell className={cn("text-right font-semibold", r.gross_margin < 0 ? "text-red-700" : "text-emerald-700")}>
+                            {formatSignedCurrency(r.gross_margin, sym)}
                           </TableCell>
                         </TableRow>
                       ))
@@ -609,8 +611,8 @@ export function ReportsPage() {
                           <TableCell>{formatCurrency(r.subtotal, sym)}</TableCell>
                           <TableCell>{formatCurrency(r.gst, sym)}</TableCell>
                           <TableCell className="font-semibold">{formatCurrency(r.total_sales, sym)}</TableCell>
-                          <TableCell className="text-right font-semibold text-emerald-700">
-                            {formatCurrency(r.gross_margin, sym)}
+                          <TableCell className={cn("text-right font-semibold", r.gross_margin < 0 ? "text-red-700" : "text-emerald-700")}>
+                            {formatSignedCurrency(r.gross_margin, sym)}
                           </TableCell>
                         </TableRow>
                       ))
@@ -644,8 +646,8 @@ export function ReportsPage() {
                           <TableCell>{formatQty(r.units)}</TableCell>
                           <TableCell className="font-semibold">{formatCurrency(r.revenue, sym)}</TableCell>
                           <TableCell>{formatCurrency(r.mfg_cost, sym)}</TableCell>
-                          <TableCell className="text-right font-semibold text-emerald-700">
-                            {formatCurrency(r.gross_margin, sym)}
+                          <TableCell className={cn("text-right font-semibold", r.gross_margin < 0 ? "text-red-700" : "text-emerald-700")}>
+                            {formatSignedCurrency(r.gross_margin, sym)}
                           </TableCell>
                         </TableRow>
                       ))
@@ -721,8 +723,8 @@ export function ReportsPage() {
                           <TableCell className="text-xs">{r.manufacturer}</TableCell>
                           <TableCell>{formatQty(r.units_sold)}</TableCell>
                           <TableCell className="font-semibold">{formatCurrency(r.revenue, sym)}</TableCell>
-                          <TableCell className="text-right font-semibold text-emerald-700">
-                            {formatCurrency(r.gross_margin, sym)}
+                          <TableCell className={cn("text-right font-semibold", r.gross_margin < 0 ? "text-red-700" : "text-emerald-700")}>
+                            {formatSignedCurrency(r.gross_margin, sym)}
                           </TableCell>
                         </TableRow>
                       ))
@@ -790,8 +792,12 @@ export function ReportsPage() {
                           <TableCell>{r.customer}</TableCell>
                           <TableCell>{formatCurrency(r.selling_total, sym)}</TableCell>
                           <TableCell>{formatCurrency(r.mfg_cost, sym)}</TableCell>
-                          <TableCell className="font-semibold text-emerald-700">{formatCurrency(r.gross_margin, sym)}</TableCell>
-                          <TableCell className="text-right font-semibold">{r.margin_pct}%</TableCell>
+                          <TableCell className={cn("font-semibold", r.gross_margin < 0 ? "text-red-700" : "text-emerald-700")}>
+                            {formatSignedCurrency(r.gross_margin, sym)}
+                          </TableCell>
+                          <TableCell className={cn("text-right font-semibold", r.margin_pct < 0 ? "text-red-700" : "text-slate-900")}>
+                            {r.margin_pct}%
+                          </TableCell>
                         </TableRow>
                       ))
                     )}

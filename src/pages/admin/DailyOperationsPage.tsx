@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
+import { formatSignedCurrency } from "@/lib/pricing";
 import { cn, formatCurrency, formatDateTime, formatQty } from "@/lib/utils";
 import type { NotificationRecord, OrderStatus, PaymentStatus } from "@/types/database";
 import { Button } from "@/components/ui/button";
@@ -423,8 +424,11 @@ export function DailyOperationsPage() {
                       </TableCell>
                       <TableCell>
                         <p className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</p>
-                        <p className="text-[11px] text-emerald-700">
-                          Paid: {formatCurrency(paidAmt, sym)} &bull; +{formatCurrency(totalMargin, sym)} margin
+                        <p className="text-[11px] text-slate-600">
+                          <span className="text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</span> &bull;{" "}
+                          <span className={totalMargin < 0 ? "font-medium text-red-700" : "text-emerald-700"}>
+                            {formatSignedCurrency(totalMargin, sym)} margin
+                          </span>
                         </p>
                         <p className={cn("text-xs font-bold", dueAmt > 0 ? "text-red-700" : "text-slate-500")}>
                           {o.order_status === "Cancelled" ? "Cancelled" : `Due: ${formatCurrency(dueAmt, sym)}`}

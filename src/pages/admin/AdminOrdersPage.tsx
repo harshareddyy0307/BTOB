@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ShoppingBag, Search, Eye, ArrowRight, IndianRupee } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
+import { formatSignedCurrency } from "@/lib/pricing";
 import { cn, formatCurrency, formatDateTime, formatQty } from "@/lib/utils";
 import { ALL_ORDER_STATUSES, type OrderStatus, type PaymentStatus } from "@/types/database";
 import { Input } from "@/components/ui/input";
@@ -247,8 +248,8 @@ export function AdminOrdersPage() {
                       </TableCell>
                       <TableCell>
                         <p className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</p>
-                        <p className="text-xs font-semibold text-emerald-700">
-                          +{formatCurrency(totalMargin, sym)} margin
+                        <p className={cn("text-xs font-semibold", totalMargin < 0 ? "text-red-700" : "text-emerald-700")}>
+                          {formatSignedCurrency(totalMargin, sym)} margin
                         </p>
                       </TableCell>
                       <TableCell>

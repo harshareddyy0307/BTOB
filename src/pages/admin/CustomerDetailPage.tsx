@@ -1,9 +1,10 @@
 import React, { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, Trash2, Loader2, IndianRupee, Power, CheckCircle2, XCircle, Clock } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Loader2, IndianRupee, Power, CheckCircle2, XCircle, Clock, AlertTriangle } from "lucide-react";
 import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
+import { calculateRealizedGrossMargin, formatSignedCurrency } from "@/lib/pricing";
 import { invalidateCatalogQueries } from "@/lib/productPublishing";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import type { AdminProduct, CustomerProfile, InvoiceRecord, OrderRecord } from "@/types/database";
@@ -71,7 +72,7 @@ export function CustomerDetailPage() {
     queryFn: async () => {
       const { data } = await supabase
         .from("products")
-        .select("id, name, sku, product_prices(published_selling_price)")
+        .select("id, name, sku, product_prices(published_selling_price, published_manufacturer_price, draft_manufacturer_price)")
         .eq("is_published", true)
         .order("name");
       return (data ?? []) as unknown as AdminProduct[];
@@ -84,22 +85,39 @@ export function CustomerDetailPage() {
     queryFn: async () => {
       const { data } = await supabase
         .from("customer_product_prices")
-        .select("*, products(name, sku, product_prices(published_selling_price))")
+        .select("*, products(name, sku, product_prices(published_selling_price, published_manufacturer_price, draft_manufacturer_price))")
         .eq("customer_id", id!);
       return data ?? [];
     },
   });
 
+  const selectedCustomProduct = allProducts.find((p) => p.id === selectedProdId);
+  const selectedCostPrice = Number(
+    selectedCustomProduct?.product_prices?.published_manufacturer_price ??
+      selectedCustomProduct?.product_prices?.draft_manufacturer_price ??
+      0
+  );
+  const parsedCustomPrice = customPrice !== "" ? Number(customPrice) : NaN;
+  const previewRealizedMargin =
+    selectedCustomProduct && Number.isFinite(parsedCustomPrice) && parsedCustomPrice >= 0
+      ? calculateRealizedGrossMargin(parsedCustomPrice, selectedCostPrice)
+      : null;
+
   const addCustomPrice = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!id || !selectedProdId || !customPrice) return;
+    const priceNum = Number(customPrice);
+    if (!Number.isFinite(priceNum) || priceNum < 0) {
+      toast({ title: "Enter a valid non-negative selling price", type: "error" });
+      return;
+    }
     setSavingOverride(true);
     try {
       const { error } = await supabase.from("customer_product_prices").upsert(
         {
           customer_id: id,
           product_id: selectedProdId,
-          custom_selling_price: Number(customPrice),
+          custom_selling_price: priceNum,
           is_active: true,
         },
         { onConflict: "customer_id,product_id" }
@@ -329,13 +347,43 @@ export function CustomerDetailPage() {
             </Button>
           </form>
 
+          {selectedCustomProduct && (
+            <div
+              className={cn(
+                "flex flex-wrap items-center justify-between gap-2 rounded-md border p-2.5 text-xs",
+                previewRealizedMargin && previewRealizedMargin.marginAmount < 0
+                  ? "border-red-200 bg-red-50 text-red-900"
+                  : "border-slate-200 bg-slate-50 text-slate-700"
+              )}
+            >
+              <div>
+                <span>
+                  Mfg Cost: <strong>{formatCurrency(selectedCostPrice, sym)}</strong> &bull; Standard Catalog:{" "}
+                  <strong>{formatCurrency(selectedCustomProduct.product_prices?.published_selling_price ?? 0, sym)}</strong>
+                </span>
+              </div>
+              {previewRealizedMargin && (
+                <div className="flex items-center gap-1.5 font-semibold">
+                  {previewRealizedMargin.marginAmount < 0 && <AlertTriangle className="h-3.5 w-3.5 text-red-700" />}
+                  <span className={previewRealizedMargin.marginAmount < 0 ? "text-red-700" : "text-emerald-700"}>
+                    Realized Margin: {formatSignedCurrency(previewRealizedMargin.marginAmount, sym)} (
+                    {previewRealizedMargin.marginPercentage}%)
+                    {previewRealizedMargin.marginAmount < 0 ? " — Selling below cost" : ""}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
           {customPrices.length > 0 && (
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Product</TableHead>
+                  <TableHead>Mfg Cost (Admin)</TableHead>
                   <TableHead>Standard Catalog Price</TableHead>
                   <TableHead>Custom Customer Price</TableHead>
+                  <TableHead>Realized Margin</TableHead>
                   <TableHead className="text-right">Action</TableHead>
                 </TableRow>
               </TableHeader>
@@ -344,16 +392,35 @@ export function CustomerDetailPage() {
                   const prod = cp.products as unknown as {
                     name: string;
                     sku: string;
-                    product_prices: { published_selling_price: number };
+                    product_prices: {
+                      published_selling_price: number;
+                      published_manufacturer_price: number | null;
+                      draft_manufacturer_price: number | null;
+                    };
                   };
+                  const costPrice = Number(
+                    prod?.product_prices?.published_manufacturer_price ??
+                      prod?.product_prices?.draft_manufacturer_price ??
+                      0
+                  );
+                  const realized = calculateRealizedGrossMargin(Number(cp.custom_selling_price), costPrice);
                   return (
                     <TableRow key={cp.id}>
                       <TableCell>
                         <p className="font-medium">{prod?.name}</p>
                         <p className="font-mono text-xs text-slate-500">{prod?.sku}</p>
                       </TableCell>
+                      <TableCell className="text-xs text-slate-600">{formatCurrency(costPrice, sym)}</TableCell>
                       <TableCell>{formatCurrency(prod?.product_prices?.published_selling_price ?? 0, sym)}</TableCell>
                       <TableCell className="font-semibold text-blue-700">{formatCurrency(cp.custom_selling_price, sym)}</TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-xs font-semibold",
+                          realized.marginAmount < 0 ? "text-red-700" : "text-emerald-700"
+                        )}
+                      >
+                        {formatSignedCurrency(realized.marginAmount, sym)} ({realized.marginPercentage}%)
+                      </TableCell>
                       <TableCell className="text-right">
                         <Button variant="ghost" size="icon" className="text-red-600" onClick={() => removeCustomPrice(cp.id)}>
                           <Trash2 className="h-4 w-4" />

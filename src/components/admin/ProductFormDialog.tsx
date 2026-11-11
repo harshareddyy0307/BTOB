@@ -1,7 +1,14 @@
 import React, { useEffect, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import {
+  calculateGrossMarginPricing,
+  formatSignedCurrency,
+  resolveClientEffectiveMargin,
+  type MarginRuleSummary,
+} from "@/lib/pricing";
+import { invalidateCatalogQueries } from "@/lib/productPublishing";
 import { formatCurrency } from "@/lib/utils";
 import type { AdminProduct, Category, Manufacturer } from "@/types/database";
 import { ProductPhotoEditor, type ProductPhotoDraft } from "@/components/admin/ProductPhotoEditor";
@@ -102,10 +109,43 @@ export function ProductFormDialog({
     }
   }, [open, product, duplicateMode, fixedManufacturerId, manufacturers, categories]);
 
+  const { data: marginRules = [] } = useQuery({
+    queryKey: ["admin-margin-rules"],
+    enabled: open,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("margin_rules")
+        .select("id, scope, category_id, product_id, margin_percentage")
+        .eq("is_active", true);
+      if (error) throw error;
+      return (data ?? []) as MarginRuleSummary[];
+    },
+  });
+
+  const activeEditProductId = product && !duplicateMode ? product.id : null;
+  const effectiveMargin = resolveClientEffectiveMargin({
+    productId: activeEditProductId,
+    categoryId: categoryId || null,
+    categories,
+    rules: marginRules,
+  });
+  const previewCost = Math.max(0, Number(manufacturerPrice) || 0);
+  const livePricingPreview = calculateGrossMarginPricing(previewCost, effectiveMargin.marginPercentage);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!manufacturerId || !categoryId) {
       toast({ title: "Manufacturer and Category are required", type: "error" });
+      return;
+    }
+
+    const mfgPriceNum = Math.max(0, Number(manufacturerPrice) || 0);
+    if (publishImmediately && livePricingPreview.sellingPrice <= 0) {
+      toast({
+        title: "Cannot publish with ₹0 selling price",
+        description: "Enter a manufacturer price above ₹0 before publishing to Customer Catalog.",
+        type: "error",
+      });
       return;
     }
 
@@ -124,7 +164,7 @@ export function ProductFormDialog({
         gst_rate: Number(gstRate) || 0,
         status,
         is_featured: isFeatured,
-        is_published: publishImmediately,
+        is_published: publishImmediately ? (isEdit && product ? product.is_published : false) : false,
       };
 
       let targetProductId = product?.id;
@@ -158,13 +198,14 @@ export function ProductFormDialog({
       const thresholdVal = Math.max(0, Number(lowStockThreshold) || 10);
 
       if (!isEdit) {
-        await supabase.from("inventory").insert({
+        const { error: invErr } = await supabase.from("inventory").insert({
           product_id: targetProductId,
           available_quantity: qtyVal,
           low_stock_threshold: thresholdVal,
         });
+        if (invErr) throw invErr;
         if (qtyVal > 0) {
-          await supabase.from("inventory_movements").insert({
+          const { error: movErr } = await supabase.from("inventory_movements").insert({
             product_id: targetProductId,
             movement_type: "restock",
             quantity_delta: qtyVal,
@@ -172,20 +213,21 @@ export function ProductFormDialog({
             reference_type: "initial_stock",
             notes: "Initial stock recorded on product creation",
           });
+          if (movErr) throw movErr;
         }
       } else {
-        await supabase
-          .from("inventory")
-          .upsert({
+        const { error: invErr } = await supabase.from("inventory").upsert(
+          {
             product_id: targetProductId,
             available_quantity: qtyVal,
             low_stock_threshold: thresholdVal,
-          })
-          .eq("product_id", targetProductId);
+          },
+          { onConflict: "product_id" }
+        );
+        if (invErr) throw invErr;
       }
 
       // Recalculate draft margin & selling price from manufacturer price
-      const mfgPriceNum = Math.max(0, Number(manufacturerPrice) || 0);
       const { error: priceErr } = await supabase.rpc("recalculate_product_draft_price", {
         p_product_id: targetProductId,
         p_new_manufacturer_price: mfgPriceNum,
@@ -201,21 +243,13 @@ export function ProductFormDialog({
         if (pubErr) throw pubErr;
       }
 
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["admin-all-products"] }),
-        queryClient.invalidateQueries({ queryKey: ["admin-manufacturer-products"] }),
-        queryClient.invalidateQueries({ queryKey: ["customer-home-catalog"] }),
-        queryClient.invalidateQueries({ queryKey: ["customer-all-products"] }),
-        queryClient.invalidateQueries({ queryKey: ["customer-category-products"] }),
-        queryClient.invalidateQueries({ queryKey: ["customer-product-detail"] }),
-        queryClient.invalidateQueries({ queryKey: ["customer-cart"] }),
-      ]);
+      await invalidateCatalogQueries(queryClient);
 
       toast({
         title: isEdit ? "Product updated" : duplicateMode ? "Product duplicated" : "Product added",
         description: publishImmediately
           ? "Selling price published to the Customer Portal."
-          : "Saved as draft pricing — approve in Margin & Pricing to publish.",
+          : "Saved as draft pricing — approve in Margin & Pricing or Catalog to publish.",
         type: "success",
       });
       onSaved();
@@ -372,14 +406,21 @@ export function ProductFormDialog({
             </div>
           </div>
 
-          {product?.product_prices && !duplicateMode && (
-            <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-              Current Margin Rule: <strong className="uppercase">{product.product_prices.draft_margin_source}</strong> (
-              {product.product_prices.draft_margin_percentage}%) &bull; Current Draft Selling Price:{" "}
-              <strong>{formatCurrency(product.product_prices.draft_selling_price)}</strong> &bull; Published Selling
-              Price: <strong>{formatCurrency(product.product_prices.published_selling_price)}</strong>
-            </div>
-          )}
+          <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+            <span>
+              Effective Rule: <strong className="uppercase">{effectiveMargin.source}</strong> (
+              {effectiveMargin.marginPercentage}%) &bull; Draft Selling Price:{" "}
+              <strong className="text-blue-700">{formatCurrency(livePricingPreview.sellingPrice)}</strong> (Margin{" "}
+              {formatSignedCurrency(livePricingPreview.marginAmount)})
+            </span>
+            {product?.product_prices && !duplicateMode && (
+              <span>
+                {" "}
+                &bull; Live Published Price:{" "}
+                <strong>{formatCurrency(product.product_prices.published_selling_price)}</strong>
+              </span>
+            )}
+          </div>
 
           <div className="flex flex-wrap items-center gap-6 rounded-md border border-slate-200 bg-slate-50/70 p-3">
             <div className="flex items-center gap-2.5">

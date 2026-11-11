@@ -25,7 +25,8 @@ import {
 } from "recharts";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
-import { formatCurrency, formatDate, formatQty } from "@/lib/utils";
+import { formatSignedCurrency } from "@/lib/pricing";
+import { cn, formatCurrency, formatDate, formatQty } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 
@@ -258,8 +259,13 @@ export function AdminDashboardPage() {
           <CardContent className="flex items-center justify-between p-5">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Estimated Gross Margin</p>
-              <p className="mt-1 text-3xl font-bold text-emerald-700">
-                {isLoading ? "—" : formatCurrency(data?.estimatedGrossMargin ?? 0, sym)}
+              <p
+                className={cn(
+                  "mt-1 text-3xl font-bold",
+                  (data?.estimatedGrossMargin ?? 0) < 0 ? "text-red-700" : "text-emerald-700"
+                )}
+              >
+                {isLoading ? "—" : formatSignedCurrency(data?.estimatedGrossMargin ?? 0, sym)}
               </p>
               <p className="mt-1 text-xs text-slate-500">Net agency margin from order price snapshots</p>
             </div>

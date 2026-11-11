@@ -7,9 +7,13 @@ const CHUNK_SIZE = 50;
 export async function invalidateCatalogQueries(queryClient: QueryClient) {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: ["admin-all-products"] }),
+    queryClient.invalidateQueries({ queryKey: ["admin-all-products-mini"] }),
+    queryClient.invalidateQueries({ queryKey: ["admin-customer-custom-prices"] }),
     queryClient.invalidateQueries({ queryKey: ["admin-manufacturer-products"] }),
     queryClient.invalidateQueries({ queryKey: ["admin-pricing-products"] }),
     queryClient.invalidateQueries({ queryKey: ["admin-price-history"] }),
+    queryClient.invalidateQueries({ queryKey: ["admin-dashboard-stats"] }),
+    queryClient.invalidateQueries({ queryKey: ["admin-reports-dataset"] }),
     queryClient.invalidateQueries({ queryKey: ["customer-home-catalog"] }),
     queryClient.invalidateQueries({ queryKey: ["customer-all-products"] }),
     queryClient.invalidateQueries({ queryKey: ["customer-category-products"] }),
@@ -18,6 +22,10 @@ export async function invalidateCatalogQueries(queryClient: QueryClient) {
   ]);
 }
 
+/**
+ * Publishes draft products (making them visible in Customer Portal) and pushes
+ * their current draft prices live.
+ */
 export async function bulkPublishProducts(
   products: AdminProduct[],
   queryClient: QueryClient,
@@ -50,6 +58,45 @@ export async function bulkPublishProducts(
   }
 
   return { publishedCount, skippedZeroPriceCount };
+}
+
+/**
+ * Updates live Customer Portal selling prices ONLY for products that are already
+ * published (`is_published = true`). Unpublished Draft products are untouched.
+ */
+export async function bulkUpdatePublishedPrices(
+  products: AdminProduct[],
+  queryClient: QueryClient,
+  options?: { onlyPending?: boolean }
+): Promise<{ updatedCount: number; skippedZeroPriceCount: number }> {
+  const onlyPending = options?.onlyPending ?? true;
+  const candidates = products.filter(
+    (p) => p.is_published && (!onlyPending || p.product_prices?.approval_status === "pending_review")
+  );
+
+  if (candidates.length === 0) {
+    return { updatedCount: 0, skippedZeroPriceCount: 0 };
+  }
+
+  const updatable = candidates.filter((p) => Number(p.product_prices?.draft_selling_price ?? 0) > 0);
+  const skippedZeroPriceCount = candidates.length - updatable.length;
+
+  let updatedCount = 0;
+  for (let i = 0; i < updatable.length; i += CHUNK_SIZE) {
+    const chunkIds = updatable.slice(i, i + CHUNK_SIZE).map((p) => p.id);
+    const { data: count, error } = await supabase.rpc("publish_product_prices", {
+      p_product_ids: chunkIds,
+      p_mark_products_published: false,
+    });
+    if (error) throw error;
+    updatedCount += Number(count ?? chunkIds.length);
+  }
+
+  if (updatedCount > 0) {
+    await invalidateCatalogQueries(queryClient);
+  }
+
+  return { updatedCount, skippedZeroPriceCount };
 }
 
 export async function bulkUnpublishProducts(

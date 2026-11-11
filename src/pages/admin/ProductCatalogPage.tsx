@@ -1,10 +1,16 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Plus, Package, Pencil, Copy, Trash2, Globe, GlobeLock, Camera, Loader2 } from "lucide-react";
+import { Plus, Package, Pencil, Copy, Trash2, Globe, GlobeLock, Camera, Loader2, RefreshCw } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
-import { bulkPublishProducts, bulkUnpublishProducts, invalidateCatalogQueries } from "@/lib/productPublishing";
+import {
+  bulkPublishProducts,
+  bulkUnpublishProducts,
+  bulkUpdatePublishedPrices,
+  invalidateCatalogQueries,
+} from "@/lib/productPublishing";
+import { isPublishedWithPendingPrice } from "@/lib/pricing";
 import { formatCurrency, formatQty } from "@/lib/utils";
 import type { AdminProduct, Category, Manufacturer } from "@/types/database";
 import { Button } from "@/components/ui/button";
@@ -34,7 +40,7 @@ export function ProductCatalogPage() {
   const [editing, setEditing] = useState<AdminProduct | null>(null);
   const [duplicateMode, setDuplicateMode] = useState(false);
   const [photoProduct, setPhotoProduct] = useState<AdminProduct | null>(null);
-  const [bulkAction, setBulkAction] = useState<"publish" | "unpublish" | null>(null);
+  const [bulkAction, setBulkAction] = useState<"publish" | "update_live" | "unpublish" | null>(null);
 
   const { data: categories = [] } = useQuery({
     queryKey: ["admin-categories"],
@@ -134,6 +140,38 @@ export function ProductCatalogPage() {
     }
   };
 
+  const handleUpdatePublishedPrices = async () => {
+    if (livePriceUpdateTargets.length === 0) return;
+    setBulkAction("update_live");
+    try {
+      const { updatedCount, skippedZeroPriceCount } = await bulkUpdatePublishedPrices(filtered, queryClient);
+      if (updatedCount === 0 && skippedZeroPriceCount > 0) {
+        toast({
+          title: "Cannot update ₹0 price products",
+          description: `${skippedZeroPriceCount} published product(s) have a ₹0 draft selling price.`,
+          type: "error",
+        });
+        return;
+      }
+      toast({
+        title: `Updated live selling prices for ${updatedCount} published product(s)`,
+        description:
+          skippedZeroPriceCount > 0
+            ? `Skipped ${skippedZeroPriceCount} ₹0-price item(s). Draft products remain unpublished.`
+            : "Customer Portal now shows the updated prices for published products.",
+        type: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Failed to update published prices",
+        description: err instanceof Error ? err.message : "Error",
+        type: "error",
+      });
+    } finally {
+      setBulkAction(null);
+    }
+  };
+
   const handleDelete = async (p: AdminProduct) => {
     if (!confirm(`Delete "${p.name}" (${p.sku})?`)) return;
     const { error } = await supabase.from("products").delete().eq("id", p.id);
@@ -142,7 +180,7 @@ export function ProductCatalogPage() {
       return;
     }
     toast({ title: "Product deleted", type: "success" });
-    queryClient.invalidateQueries({ queryKey: ["admin-all-products"] });
+    void invalidateCatalogQueries(queryClient);
   };
 
   const filtered = products.filter((p) => {
@@ -180,6 +218,7 @@ export function ProductCatalogPage() {
     Boolean(maxPrice);
   const draftTargets = filtered.filter((p) => !p.is_published);
   const publishedTargets = filtered.filter((p) => p.is_published);
+  const livePriceUpdateTargets = filtered.filter((p) => isPublishedWithPendingPrice(p));
 
   return (
     <div className="space-y-6">
@@ -287,6 +326,26 @@ export function ProductCatalogPage() {
             Products ({filtered.length})
           </CardTitle>
           <div className="flex flex-wrap items-center gap-2">
+            {livePriceUpdateTargets.length > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="border-blue-200 text-blue-700 hover:bg-blue-50 hover:text-blue-800"
+                disabled={bulkAction !== null}
+                onClick={handleUpdatePublishedPrices}
+                title="Update live Customer Portal prices for published products without publishing Draft items"
+              >
+                {bulkAction === "update_live" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                {hasActiveFilters
+                  ? `Update Published Prices (${livePriceUpdateTargets.length})`
+                  : `Update Published Prices (${livePriceUpdateTargets.length})`}
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -402,7 +461,19 @@ export function ProductCatalogPage() {
                         {formatCurrency(p.product_prices?.draft_margin_amount ?? 0)})
                       </TableCell>
                       <TableCell className="font-semibold text-blue-700">
-                        {formatCurrency(p.product_prices?.published_selling_price || p.product_prices?.draft_selling_price || 0)}
+                        <div>
+                          <span>{formatCurrency(p.product_prices?.draft_selling_price ?? 0)}</span>
+                          {p.product_prices?.approval_status === "pending_review" && (
+                            <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
+                              Draft
+                            </span>
+                          )}
+                        </div>
+                        {isPublishedWithPendingPrice(p) && (
+                          <p className="text-[11px] font-normal text-slate-500">
+                            Live: {formatCurrency(p.product_prices?.published_selling_price ?? 0)}
+                          </p>
+                        )}
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-col gap-1">
@@ -485,7 +556,7 @@ export function ProductCatalogPage() {
         duplicateMode={duplicateMode}
         manufacturers={manufacturers}
         categories={categories}
-        onSaved={() => queryClient.invalidateQueries({ queryKey: ["admin-all-products"] })}
+        onSaved={() => void invalidateCatalogQueries(queryClient)}
       />
 
       <ProductPhotoDialog
@@ -494,7 +565,7 @@ export function ProductCatalogPage() {
           if (!open) setPhotoProduct(null);
         }}
         product={photoProduct}
-        onSaved={() => queryClient.invalidateQueries({ queryKey: ["admin-all-products"] })}
+        onSaved={() => void invalidateCatalogQueries(queryClient)}
       />
     </div>
   );

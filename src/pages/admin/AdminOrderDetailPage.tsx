@@ -16,6 +16,7 @@ import {
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { generateCustomerInvoicePdf } from "@/lib/pdfGenerator";
+import { formatSignedCurrency } from "@/lib/pricing";
 import { cn, formatCurrency, formatDate, formatDateTime, formatQty } from "@/lib/utils";
 import {
   ALL_ORDER_STATUSES,
@@ -348,8 +349,11 @@ export function AdminOrderDetailPage() {
               <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-right space-y-1">
                 <p className="text-[11px] font-semibold uppercase text-slate-500">Customer Grand Total</p>
                 <p className="text-xl font-bold text-slate-900">{formatCurrency(order.total_amount, sym)}</p>
-                <p className="text-xs font-medium text-emerald-700">
-                  Paid: {formatCurrency(paidAmt, sym)} &bull; Gross Margin: +{formatCurrency(totalGrossMargin, sym)}
+                <p className="text-xs font-medium text-slate-600">
+                  <span className="text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</span> &bull;{" "}
+                  <span className={totalGrossMargin < 0 ? "text-red-700" : "text-emerald-700"}>
+                    Gross Margin: {formatSignedCurrency(totalGrossMargin, sym)}
+                  </span>
                 </p>
                 <p className={cn("text-sm font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
                   {order.order_status === "Cancelled"
@@ -493,8 +497,13 @@ export function AdminOrderDetailPage() {
                     <TableCell className="text-xs text-slate-700">
                       {fin ? formatCurrency(fin.unit_manufacturer_price, sym) : "—"}
                     </TableCell>
-                    <TableCell className="text-xs font-medium text-emerald-700">
-                      {fin ? `${fin.margin_percentage_snapshot}% (+${formatCurrency(fin.margin_amount_total, sym)})` : "—"}
+                    <TableCell
+                      className={cn(
+                        "text-xs font-medium",
+                        fin && Number(fin.margin_amount_total) < 0 ? "text-red-700" : "text-emerald-700"
+                      )}
+                    >
+                      {fin ? `${fin.margin_percentage_snapshot}% (${formatSignedCurrency(fin.margin_amount_total, sym)})` : "—"}
                     </TableCell>
                     <TableCell className="font-medium">{formatCurrency(item.unit_selling_price, sym)}</TableCell>
                     <TableCell className="text-xs text-slate-500">{item.gst_rate}%</TableCell>
