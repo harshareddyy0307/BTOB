@@ -13,6 +13,7 @@ export function LoginPage() {
   const navigate = useNavigate();
 
   const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +49,14 @@ export function LoginPage() {
     setError(null);
     setSubmitting(true);
     const { data, error: fnErr } = await supabase.functions.invoke("bootstrap-admin", {
-      body: { full_name: fullName, email, phone, password, agency_name: agencyName },
+      body: {
+        full_name: fullName,
+        username: username.trim().toLowerCase() || undefined,
+        email,
+        phone,
+        password,
+        agency_name: agencyName,
+      },
     });
 
     if (fnErr || data?.error) {
@@ -129,6 +137,17 @@ export function LoginPage() {
                   />
                 </div>
                 <div className="space-y-1.5">
+                  <Label htmlFor="setupUsername">Admin Login Username (optional)</Label>
+                  <Input
+                    id="setupUsername"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, ""))}
+                    placeholder="e.g. rajesh_admin"
+                    maxLength={32}
+                    className="font-mono"
+                  />
+                </div>
+                <div className="space-y-1.5">
                   <Label htmlFor="phone">Phone Number</Label>
                   <Input
                     id="phone"
@@ -182,14 +201,14 @@ export function LoginPage() {
             <CardContent>
               <form onSubmit={handleLogin} className="space-y-4">
                 <div className="space-y-1.5">
-                  <Label htmlFor="email">Business / Staff Email</Label>
+                  <Label htmlFor="email">Username or Email</Label>
                   <Input
                     id="email"
-                    type="email"
-                    autoComplete="email"
+                    type="text"
+                    autoComplete="username"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@company.in"
+                    placeholder="username or you@company.in"
                     required
                   />
                 </div>

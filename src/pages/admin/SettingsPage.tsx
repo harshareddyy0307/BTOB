@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Settings, Users, ShieldCheck, Upload, Plus, Power, Loader2, History } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { Settings, Users, ShieldCheck, Upload, Plus, Power, Loader2, History, KeyRound } from "lucide-react";
 import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
 import { uploadStorageFile } from "@/lib/storage";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDateTime } from "@/lib/utils";
 import type { AgencySettings, AppUser, AuditLogRecord } from "@/types/database";
+import { AdminCredentialsSecurityTab } from "@/components/admin/AdminCredentialsSecurityTab";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,7 +24,12 @@ export function SettingsPage() {
   const { role, userProfile, refreshBranding } = useAuth();
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const isOwnerAdmin = role === "admin";
+
+  const requestedTab = searchParams.get("tab");
+  const activeTab =
+    requestedTab && ["agency", "security", "staff", "audit"].includes(requestedTab) ? requestedTab : "agency";
 
   const [form, setForm] = useState<Partial<AgencySettings>>({});
   const [savingSettings, setSavingSettings] = useState(false);
@@ -57,12 +64,13 @@ export function SettingsPage() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from("users")
-        .select("id, role_id, full_name, email, phone, is_active, created_at, roles!inner(name)")
+        .select("id, role_id, username, full_name, email, phone, is_active, created_at, roles!inner(name)")
         .in("roles.name", ["admin", "staff"])
         .order("created_at", { ascending: false });
       if (error) throw error;
       return (data ?? []).map((u) => ({
         ...u,
+        username: (u as { username?: string | null }).username ?? null,
         role: (u.roles as unknown as { name: AppUser["role"] }).name,
       })) as AppUser[];
     },
@@ -208,9 +216,16 @@ export function SettingsPage() {
         </div>
       )}
 
-      <Tabs defaultValue="agency">
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) => setSearchParams(v === "agency" ? {} : { tab: v }, { replace: true })}
+      >
         <TabsList>
           <TabsTrigger value="agency">Agency Profile &amp; GST</TabsTrigger>
+          <TabsTrigger value="security" className="gap-1.5">
+            <KeyRound className="h-3.5 w-3.5" />
+            Admin Credentials &amp; PIN
+          </TabsTrigger>
           <TabsTrigger value="staff">Staff &amp; Admin Users ({staffUsers.length})</TabsTrigger>
           <TabsTrigger value="audit">System Audit Logs ({auditLogs.length})</TabsTrigger>
         </TabsList>
@@ -418,6 +433,10 @@ export function SettingsPage() {
           </Card>
         </TabsContent>
 
+        <TabsContent value="security">
+          <AdminCredentialsSecurityTab />
+        </TabsContent>
+
         <TabsContent value="staff" className="space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-sm text-slate-600">
@@ -461,9 +480,14 @@ export function SettingsPage() {
                     staffUsers.map((u) => (
                       <TableRow key={u.id}>
                         <TableCell className="font-semibold text-slate-900">
-                          {u.full_name}
-                          {u.id === userProfile?.id && (
-                            <span className="ml-2 text-xs font-normal text-blue-700">(You)</span>
+                          <div>
+                            {u.full_name}
+                            {u.id === userProfile?.id && (
+                              <span className="ml-2 text-xs font-normal text-blue-700">(You)</span>
+                            )}
+                          </div>
+                          {u.username && (
+                            <span className="font-mono text-[11px] font-normal text-slate-500">@{u.username}</span>
                           )}
                         </TableCell>
                         <TableCell className="text-xs text-slate-600">{u.email}</TableCell>

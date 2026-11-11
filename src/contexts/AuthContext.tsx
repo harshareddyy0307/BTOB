@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
-import { isSupabaseConfigured, supabase } from "@/lib/supabase";
+import { extractEdgeFunctionError, isSupabaseConfigured, supabase } from "@/lib/supabase";
 import type { AppUser, CustomerProfile, UserRole } from "@/types/database";
 
 interface PublicBranding {
@@ -17,7 +17,7 @@ interface AuthContextValue {
   role: UserRole | null;
   branding: PublicBranding;
   loading: boolean;
-  signIn: (email: string, password: string) => Promise<{ error: string | null; role?: UserRole | null }>;
+  signIn: (identifier: string, password: string) => Promise<{ error: string | null; role?: UserRole | null }>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   refreshBranding: () => Promise<void>;
@@ -50,7 +50,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const loadUserDetails = useCallback(async (userId: string): Promise<UserRole | null> => {
     const { data: userRow, error: userErr } = await supabase
       .from("users")
-      .select("id, role_id, full_name, email, phone, is_active, created_at, roles!inner(name)")
+      .select("id, role_id, username, full_name, email, phone, is_active, created_at, roles!inner(name)")
       .eq("id", userId)
       .single();
 
@@ -66,6 +66,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       role_id: userRow.role_id,
       role: roleName,
       full_name: userRow.full_name,
+      username: (userRow as { username?: string | null }).username ?? null,
       email: userRow.email,
       phone: userRow.phone,
       is_active: userRow.is_active,
@@ -231,18 +232,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [loadUserDetails, refreshBranding]);
 
-  const signIn = async (email: string, password: string) => {
+  const signIn = async (identifier: string, password: string) => {
     if (!isSupabaseConfigured) {
       return { error: "Supabase environment variables are not configured." };
     }
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: email.trim().toLowerCase(),
-      password,
-    });
-    if (error || !data.user) {
-      return { error: error?.message || "Invalid email or password" };
+    const cleanIdentifier = identifier.trim().toLowerCase();
+    let authedUserId: string | undefined;
+
+    if (cleanIdentifier.includes("@")) {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: cleanIdentifier,
+        password,
+      });
+      if (error || !data.user) {
+        return { error: error?.message || "Invalid email or password" };
+      }
+      authedUserId = data.user.id;
+    } else {
+      const { data: fnData, error: fnErr } = await supabase.functions.invoke("username-login", {
+        body: { identifier: cleanIdentifier, password },
+      });
+      if (fnErr || fnData?.error || !fnData?.access_token || !fnData?.refresh_token) {
+        const msg = await extractEdgeFunctionError(fnErr, fnData, "Invalid username or password");
+        return { error: msg };
+      }
+      const { data: sessData, error: sessErr } = await supabase.auth.setSession({
+        access_token: fnData.access_token as string,
+        refresh_token: fnData.refresh_token as string,
+      });
+      if (sessErr || !sessData.user) {
+        return { error: sessErr?.message || "Failed to initialize session" };
+      }
+      authedUserId = sessData.user.id;
     }
-    const role = await loadUserDetails(data.user.id);
+
+    const role = await loadUserDetails(authedUserId);
     if (!role) {
       await supabase.auth.signOut({ scope: "local" });
       return { error: "Your account is inactive or lacks an assigned portal role." };

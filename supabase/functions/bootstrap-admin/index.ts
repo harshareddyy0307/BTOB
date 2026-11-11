@@ -36,12 +36,23 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    const { full_name, email, phone, password, agency_name } = await req.json();
+    const { full_name, username, email, phone, password, agency_name } = await req.json();
     if (!full_name || !email || !password || String(password).length < 8) {
       return new Response(JSON.stringify({ error: "Full name, email, and password (8+ chars) are required" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    }
+
+    const cleanUsername = username ? String(username).trim().toLowerCase() : null;
+    if (cleanUsername && !/^[a-z0-9._-]{3,32}$/.test(cleanUsername)) {
+      return new Response(
+        JSON.stringify({ error: "Username must be 3-32 characters using letters, numbers, '.', '_', or '-'" }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
     }
 
     const { data: adminRole } = await adminClient
@@ -77,6 +88,7 @@ Deno.serve(async (req: Request) => {
       id: authData.user.id,
       role_id: adminRole.id,
       full_name,
+      username: cleanUsername,
       email: cleanEmail,
       phone: phone || null,
       is_active: true,

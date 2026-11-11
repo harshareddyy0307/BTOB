@@ -21,6 +21,7 @@ import {
   LogOut,
   Menu,
   X,
+  KeyRound,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/supabase";
@@ -165,10 +166,33 @@ export function AdminLayout() {
 
         <div className="border-t border-slate-200 p-3">
           {!collapsed && (
-            <div className="mb-2 rounded-md bg-slate-50 px-3 py-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (userProfile?.role === "admin") {
+                  setMobileOpen(false);
+                  navigate("/admin/settings?tab=security");
+                }
+              }}
+              className={cn(
+                "mb-2 w-full rounded-md bg-slate-50 px-3 py-2 text-left transition-colors",
+                userProfile?.role === "admin" && "hover:bg-blue-50/70"
+              )}
+              title={userProfile?.role === "admin" ? "Manage admin username, password & 4-digit PIN" : undefined}
+            >
               <p className="truncate text-xs font-semibold text-slate-800">{userProfile?.full_name}</p>
-              <p className="truncate text-[11px] uppercase tracking-wide text-slate-500">{userProfile?.role}</p>
-            </div>
+              <p className="truncate text-[11px] tracking-wide text-slate-500">
+                {userProfile?.username ? <span className="font-mono text-slate-600">@{userProfile.username}</span> : null}
+                {userProfile?.username ? " • " : ""}
+                <span className="uppercase">{userProfile?.role}</span>
+              </p>
+              {userProfile?.role === "admin" && (
+                <p className="mt-1 flex items-center gap-1 text-[11px] font-medium text-blue-700">
+                  <KeyRound className="h-3 w-3 shrink-0" />
+                  <span>Credentials &amp; 4-digit PIN</span>
+                </p>
+              )}
+            </button>
           )}
           <Button
             variant="ghost"
