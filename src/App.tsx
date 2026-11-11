@@ -113,8 +113,8 @@ export function App() {
           <BrowserRouter>
             <Suspense fallback={<RouteLoader />}>
               <Routes>
-                <Route path="/login" element={<LoginPage />} />
-                <Route path="/admin/login" element={<Navigate to="/login?portal=admin" replace />} />
+                <Route path="/login" element={<LoginPage portal="customer" />} />
+                <Route path="/24102026" element={<LoginPage portal="admin" />} />
                 <Route path="/customer/login" element={<Navigate to="/login" replace />} />
 
                 {/* ADMIN PORTAL (Admin & Staff Roles Only) */}

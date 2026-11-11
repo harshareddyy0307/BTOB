@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ShieldCheck, Building2, Lock, AlertTriangle, Loader2, Store, ArrowRight } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { extractEdgeFunctionError, isSupabaseConfigured, supabase } from "@/lib/supabase";
@@ -7,22 +7,19 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-type PortalTab = "customer" | "admin";
+interface LoginPageProps {
+  portal?: "customer" | "admin";
+}
 
-export function LoginPage() {
-  const { signIn, signInCustomer, role, branding, refreshBranding, loading: authLoading } = useAuth();
+export function LoginPage({ portal = "customer" }: LoginPageProps) {
+  const { signIn, signInCustomer, signOut, role, branding, refreshBranding, loading: authLoading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [searchParams] = useSearchParams();
 
   const fromState = location.state as { from?: { pathname?: string; search?: string } } | null;
   const fromPath = fromState?.from?.pathname;
-  const initialPortal: PortalTab =
-    searchParams.get("portal") === "admin" || fromPath?.startsWith("/admin") ? "admin" : "customer";
 
-  const [portalTab, setPortalTab] = useState<PortalTab>(initialPortal);
   const [customerIdentifier, setCustomerIdentifier] = useState("");
   const [email, setEmail] = useState("");
   const [username, setUsername] = useState("");
@@ -37,10 +34,8 @@ export function LoginPage() {
   const [phone, setPhone] = useState("");
 
   useEffect(() => {
-    if (searchParams.get("portal") === "admin" || fromPath?.startsWith("/admin")) {
-      setPortalTab("admin");
-    }
-  }, [searchParams, fromPath]);
+    setError(null);
+  }, [portal]);
 
   useEffect(() => {
     if (!authLoading && role && !submitting && !hasNavigatedRef.current) {
@@ -48,11 +43,6 @@ export function LoginPage() {
       navigate(role === "customer" ? "/customer/home" : "/admin/dashboard", { replace: true });
     }
   }, [authLoading, role, submitting, navigate]);
-
-  const handlePortalTabChange = (value: string) => {
-    setPortalTab(value === "admin" ? "admin" : "customer");
-    setError(null);
-  };
 
   const handleCustomerLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -86,13 +76,15 @@ export function LoginPage() {
       return;
     }
 
-    hasNavigatedRef.current = true;
-    setSubmitting(false);
     if (res.role === "customer") {
-      navigate("/customer/home", { replace: true });
+      await signOut();
+      setSubmitting(false);
+      setError("Customer accounts must sign in through the Customer Portal at /login.");
       return;
     }
 
+    hasNavigatedRef.current = true;
+    setSubmitting(false);
     const target = fromPath && fromPath.startsWith("/admin") ? `${fromPath}${fromState?.from?.search ?? ""}` : "/admin/dashboard";
     navigate(target, { replace: true });
   };
@@ -157,7 +149,7 @@ export function LoginPage() {
           </div>
         )}
 
-        {!branding.has_admin && isSupabaseConfigured ? (
+        {!branding.has_admin && isSupabaseConfigured && portal === "admin" ? (
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -239,108 +231,94 @@ export function LoginPage() {
               </form>
             </CardContent>
           </Card>
+        ) : portal === "customer" ? (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Store className="h-4 w-4 text-blue-700" />
+                Customer Portal Access
+              </CardTitle>
+              <CardDescription>
+                Enter your registered business phone number or email &mdash; no password needed.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleCustomerLogin} className="space-y-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="customerIdentifier">Registered Phone Number or Email</Label>
+                  <Input
+                    id="customerIdentifier"
+                    type="text"
+                    autoComplete="tel"
+                    value={customerIdentifier}
+                    onChange={(e) => setCustomerIdentifier(e.target.value)}
+                    placeholder="e.g. 9618401231 or shop@business.in"
+                    required
+                  />
+                  <p className="text-xs text-slate-500">
+                    Instant passwordless entry for active registered customer businesses.
+                  </p>
+                </div>
+
+                {error && <p className="rounded-md bg-red-50 p-2.5 text-xs font-medium text-red-700">{error}</p>}
+
+                <Button type="submit" className="w-full" disabled={submitting || !isSupabaseConfigured}>
+                  {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
+                  Enter Customer Portal
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
         ) : (
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                {portalTab === "customer" ? (
-                  <Store className="h-4 w-4 text-blue-700" />
-                ) : (
-                  <Lock className="h-4 w-4 text-blue-700" />
-                )}
-                {portalTab === "customer" ? "Customer Portal Access" : "Admin & Staff Sign In"}
+                <Lock className="h-4 w-4 text-blue-700" />
+                Admin &amp; Staff Sign In
               </CardTitle>
-              <CardDescription>
-                {portalTab === "customer"
-                  ? "Enter your registered business phone number or email — no password needed."
-                  : "Sign in with your agency administrator or staff credentials."}
-              </CardDescription>
+              <CardDescription>Sign in with your agency administrator or staff credentials.</CardDescription>
             </CardHeader>
             <CardContent>
-              <Tabs value={portalTab} onValueChange={handlePortalTabChange}>
-                <TabsList className="mb-4 grid w-full grid-cols-2">
-                  <TabsTrigger value="customer" className="gap-1.5">
-                    <Store className="h-3.5 w-3.5" />
-                    Customer Portal
-                  </TabsTrigger>
-                  <TabsTrigger value="admin" className="gap-1.5">
-                    <Lock className="h-3.5 w-3.5" />
-                    Admin / Staff
-                  </TabsTrigger>
-                </TabsList>
+              <form onSubmit={handleAdminLogin} className="space-y-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="email">Username or Email</Label>
+                  <Input
+                    id="email"
+                    type="text"
+                    autoComplete="username"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="username or you@company.in"
+                    required
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="password">Password</Label>
+                  <Input
+                    id="password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                  />
+                </div>
 
-                <TabsContent value="customer" className="mt-0">
-                  <form onSubmit={handleCustomerLogin} className="space-y-4">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="customerIdentifier">Registered Phone Number or Email</Label>
-                      <Input
-                        id="customerIdentifier"
-                        type="text"
-                        autoComplete="tel"
-                        value={customerIdentifier}
-                        onChange={(e) => setCustomerIdentifier(e.target.value)}
-                        placeholder="e.g. 9618401231 or shop@business.in"
-                        required
-                      />
-                      <p className="text-xs text-slate-500">
-                        Instant passwordless entry for active registered customer businesses.
-                      </p>
-                    </div>
+                {error && <p className="rounded-md bg-red-50 p-2.5 text-xs font-medium text-red-700">{error}</p>}
 
-                    {error && <p className="rounded-md bg-red-50 p-2.5 text-xs font-medium text-red-700">{error}</p>}
-
-                    <Button type="submit" className="w-full" disabled={submitting || !isSupabaseConfigured}>
-                      {submitting ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <ArrowRight className="h-4 w-4" />
-                      )}
-                      Enter Customer Portal
-                    </Button>
-                  </form>
-                </TabsContent>
-
-                <TabsContent value="admin" className="mt-0">
-                  <form onSubmit={handleAdminLogin} className="space-y-4">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="email">Username or Email</Label>
-                      <Input
-                        id="email"
-                        type="text"
-                        autoComplete="username"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        placeholder="username or you@company.in"
-                        required
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="password">Password</Label>
-                      <Input
-                        id="password"
-                        type="password"
-                        autoComplete="current-password"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        required
-                      />
-                    </div>
-
-                    {error && <p className="rounded-md bg-red-50 p-2.5 text-xs font-medium text-red-700">{error}</p>}
-
-                    <Button type="submit" className="w-full" disabled={submitting || !isSupabaseConfigured}>
-                      {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                      Sign In to Admin Portal
-                    </Button>
-                  </form>
-                </TabsContent>
-              </Tabs>
+                <Button type="submit" className="w-full" disabled={submitting || !isSupabaseConfigured}>
+                  {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+                  Sign In to Admin Portal
+                </Button>
+              </form>
             </CardContent>
           </Card>
         )}
 
         <p className="text-center text-xs text-slate-400">
-          Passwordless Customer Portal &bull; Protected Admin Portal
+          {portal === "customer"
+            ? "Passwordless Customer Portal • Authorized Businesses Only"
+            : "Protected Admin & Staff Portal • Authorized Personnel Only"}
         </p>
       </div>
     </div>

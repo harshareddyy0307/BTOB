@@ -27,7 +27,7 @@ export function ProtectedRoute({ allowedRoles, children }: ProtectedRouteProps) 
   }
 
   if (!session || !role) {
-    const loginPath = suppressReturnTo && location.pathname.startsWith("/admin") ? "/login?portal=admin" : "/login";
+    const loginPath = suppressReturnTo && location.pathname.startsWith("/admin") ? "/24102026" : "/login";
     return <Navigate to={loginPath} state={suppressReturnTo ? undefined : { from: location }} replace />;
   }
 
