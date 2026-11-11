@@ -22,6 +22,13 @@ import {
   FileDown,
 } from "lucide-react";
 import { exportSingleManufacturerPdf } from "@/lib/adminPdfExports";
+import {
+  buildUniqueCategorySlug,
+  extractSpreadsheetProductRows,
+  normalizeCategoryLookupKey,
+  parseSpreadsheetNumber,
+  pickWorkbookProductSheet,
+} from "@/lib/excelProductImport";
 import { fetchAllRows, supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import {
@@ -33,7 +40,7 @@ import {
 import { getCategoryAndDescendantIds } from "@/lib/categories";
 import { isPublishedWithPendingPrice } from "@/lib/pricing";
 import { RASTER_IMAGE_ACCEPT, getManufacturerAssetSignedUrl, uploadStorageFile } from "@/lib/storage";
-import { formatCurrency, formatQty } from "@/lib/utils";
+import { formatCurrency, formatQty, slugify } from "@/lib/utils";
 import type { AdminProduct, Category, Manufacturer } from "@/types/database";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -74,6 +81,12 @@ export function ManufacturerDetailPage() {
   // Bulk Excel Import Dialog
   const [importOpen, setImportOpen] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [autoCreateCategories, setAutoCreateCategories] = useState(true);
+  const [importFeedback, setImportFeedback] = useState<{
+    kind: "error" | "warning" | "success";
+    summary: string;
+    details: string[];
+  } | null>(null);
   const [exportingPdf, setExportingPdf] = useState(false);
 
   const { data: manufacturer, isLoading: loadingMfg } = useQuery({
@@ -214,22 +227,116 @@ export function ManufacturerDetailPage() {
     const file = e.target.files?.[0];
     if (!file || !id) return;
     setImporting(true);
+    setImportFeedback(null);
     try {
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf);
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet);
-      if (rows.length === 0) throw new Error("Spreadsheet has no rows.");
+      const sheet = pickWorkbookProductSheet(wb);
+      if (!sheet) throw new Error("Spreadsheet contains no readable worksheets.");
+      const rows = extractSpreadsheetProductRows(sheet);
+      if (rows.length === 0) throw new Error("Spreadsheet has no product data rows.");
 
-      const catByName = new Map(categories.map((c) => [c.name.toLowerCase().trim(), c.id]));
-      const candidateSkus = Array.from(
-        new Set(
-          rows
-            .map((r) => String(r.sku || "").trim().toUpperCase())
-            .filter(Boolean)
-        )
-      );
+      const { data: liveCategories, error: catLoadErr } = await supabase
+        .from("categories")
+        .select("id, name, slug, sort_order")
+        .order("sort_order", { ascending: true })
+        .order("name", { ascending: true });
+      if (catLoadErr) throw catLoadErr;
 
+      const catByKey = new Map<string, { id: string; name: string }>();
+      const catBySlug = new Map<string, { id: string; name: string }>();
+      const usedSlugs = new Set<string>();
+      let nextSortOrder = 0;
+
+      for (const c of liveCategories ?? []) {
+        const key = normalizeCategoryLookupKey(c.name);
+        if (key && !catByKey.has(key)) catByKey.set(key, { id: c.id, name: c.name });
+        const normSlug = slugify(c.slug || c.name);
+        if (normSlug && !catBySlug.has(normSlug)) catBySlug.set(normSlug, { id: c.id, name: c.name });
+        if (c.slug) usedSlugs.add(c.slug.toLowerCase());
+        if (typeof c.sort_order === "number" && c.sort_order >= nextSortOrder) {
+          nextSortOrder = c.sort_order + 10;
+        }
+      }
+
+      const createdCategoryNames: string[] = [];
+      const resolveOrCreateCategory = async (rawCategoryName: string): Promise<{ id: string } | { error: string }> => {
+        const cleanName = rawCategoryName.replace(/\s+/g, " ").trim();
+        if (cleanName) {
+          const byKey = catByKey.get(normalizeCategoryLookupKey(cleanName));
+          if (byKey) return { id: byKey.id };
+          const slugCandidate = slugify(cleanName);
+          if (slugCandidate) {
+            const bySlug = catBySlug.get(slugCandidate);
+            if (bySlug) return { id: bySlug.id };
+          }
+          if (!autoCreateCategories) {
+            return { error: `unknown category "${cleanName}"` };
+          }
+        } else {
+          const fallbackId =
+            manufacturer?.manufacturer_categories?.[0]?.category_id || liveCategories?.[0]?.id || undefined;
+          if (fallbackId) return { id: fallbackId };
+          if (!autoCreateCategories) {
+            return { error: "no category available" };
+          }
+        }
+
+        const newName = cleanName || "General";
+        let candidateSlug = buildUniqueCategorySlug(newName, usedSlugs);
+
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const { data: createdCat, error: createCatErr } = await supabase
+            .from("categories")
+            .insert({
+              name: newName,
+              slug: candidateSlug,
+              status: "active",
+              sort_order: nextSortOrder,
+            })
+            .select("id, name, slug")
+            .single();
+
+          if (!createCatErr && createdCat) {
+            nextSortOrder += 10;
+            usedSlugs.add(createdCat.slug.toLowerCase());
+            catByKey.set(normalizeCategoryLookupKey(createdCat.name), { id: createdCat.id, name: createdCat.name });
+            const createdNormSlug = slugify(createdCat.slug || createdCat.name);
+            if (createdNormSlug) catBySlug.set(createdNormSlug, { id: createdCat.id, name: createdCat.name });
+            createdCategoryNames.push(createdCat.name);
+            return { id: createdCat.id };
+          }
+
+          if (createCatErr?.code === "23505") {
+            const { data: existingMatch } = await supabase
+              .from("categories")
+              .select("id, name, slug")
+              .eq("slug", candidateSlug)
+              .maybeSingle();
+            if (existingMatch) {
+              usedSlugs.add(existingMatch.slug.toLowerCase());
+              catByKey.set(normalizeCategoryLookupKey(existingMatch.name), {
+                id: existingMatch.id,
+                name: existingMatch.name,
+              });
+              catByKey.set(normalizeCategoryLookupKey(newName), {
+                id: existingMatch.id,
+                name: existingMatch.name,
+              });
+              return { id: existingMatch.id };
+            }
+            usedSlugs.add(candidateSlug);
+            candidateSlug = buildUniqueCategorySlug(`${newName}-${attempt + 2}`, usedSlugs);
+            continue;
+          }
+
+          return { error: `could not create category "${newName}": ${createCatErr?.message || "Insert failed"}` };
+        }
+
+        return { error: `could not create category "${newName}"` };
+      };
+
+      const candidateSkus = Array.from(new Set(rows.map((r) => r.sku).filter(Boolean)));
       const existingBySku = new Map<
         string,
         { id: string; manufacturer_id: string; available_quantity: number; low_stock_threshold: number }
@@ -255,12 +362,10 @@ export function ManufacturerDetailPage() {
 
       let importedCount = 0;
       const skippedReasons: string[] = [];
+      const usedCategoryIds = new Set<string>();
 
-      for (let idx = 0; idx < rows.length; idx++) {
-        const r = rows[idx];
-        const rowLabel = `Row ${idx + 2}`;
-        const prodName = String(r.name ?? "").trim();
-        const prodSku = String(r.sku ?? "").trim().toUpperCase();
+      for (const row of rows) {
+        const { rowLabel, name: prodName, sku: prodSku } = row;
         if (!prodName || !prodSku) {
           skippedReasons.push(`${rowLabel}: missing name or SKU`);
           continue;
@@ -272,152 +377,204 @@ export function ManufacturerDetailPage() {
           continue;
         }
 
-        const catKey = String(r.category_name ?? "").toLowerCase().trim();
-        const matchedCatId = catKey ? catByName.get(catKey) : undefined;
-        if (catKey && !matchedCatId) {
-          skippedReasons.push(`${rowLabel} (${prodSku}): unknown category "${String(r.category_name).trim()}"`);
-          continue;
-        }
-        const resolvedCatId = matchedCatId || categories[0]?.id;
-        if (!resolvedCatId) {
-          skippedReasons.push(`${rowLabel} (${prodSku}): no category available`);
-          continue;
-        }
-
-        const rawMfgPrice = r.manufacturer_price;
-        const mfgPriceNum =
-          rawMfgPrice === undefined || rawMfgPrice === null || String(rawMfgPrice).trim() === ""
-            ? 0
-            : Number(rawMfgPrice);
-        if (!Number.isFinite(mfgPriceNum) || mfgPriceNum < 0) {
+        const mfgPriceNum = parseSpreadsheetNumber(row.mfgPriceRaw, 0);
+        if (mfgPriceNum === null || mfgPriceNum < 0) {
           skippedReasons.push(`${rowLabel} (${prodSku}): invalid manufacturer_price`);
           continue;
         }
 
-        const rawStock = r.available_quantity;
-        const stockQty =
-          rawStock === undefined || rawStock === null || String(rawStock).trim() === ""
-            ? 0
-            : Number(rawStock);
-        if (!Number.isFinite(stockQty) || stockQty < 0) {
+        const stockQty = parseSpreadsheetNumber(row.stockRaw, 0);
+        if (stockQty === null || stockQty < 0) {
           skippedReasons.push(`${rowLabel} (${prodSku}): invalid available_quantity`);
           continue;
         }
 
-        const rawMoq = r.min_order_quantity;
-        const moqVal =
-          rawMoq === undefined || rawMoq === null || String(rawMoq).trim() === "" ? 1 : Number(rawMoq);
-        if (!Number.isFinite(moqVal) || moqVal <= 0) {
+        const moqVal = parseSpreadsheetNumber(row.moqRaw, 1);
+        if (moqVal === null || moqVal <= 0) {
           skippedReasons.push(`${rowLabel} (${prodSku}): min_order_quantity must be > 0`);
           continue;
         }
 
-        const rawGst = r.gst_rate;
-        const gstVal =
-          rawGst === undefined || rawGst === null || String(rawGst).trim() === "" ? 18 : Number(rawGst);
-        if (!Number.isFinite(gstVal) || gstVal < 0 || gstVal > 100) {
+        const gstVal = parseSpreadsheetNumber(row.gstRaw, 18);
+        if (gstVal === null || gstVal < 0 || gstVal > 100) {
           skippedReasons.push(`${rowLabel} (${prodSku}): gst_rate must be 0-100`);
           continue;
         }
+
+        const catResult = await resolveOrCreateCategory(row.categoryName);
+        if ("error" in catResult) {
+          skippedReasons.push(`${rowLabel} (${prodSku}): ${catResult.error}`);
+          continue;
+        }
+        const resolvedCatId = catResult.id;
 
         const basePayload = {
           manufacturer_id: id,
           category_id: resolvedCatId,
           name: prodName,
           sku: prodSku,
-          description: r.description ? String(r.description).trim() || null : null,
-          unit_of_measurement: String(r.unit_of_measurement || "pcs").trim() || "pcs",
+          description: row.description,
+          unit_of_measurement: row.unitOfMeasurement,
           min_order_quantity: moqVal,
-          hsn_code: r.hsn_code ? String(r.hsn_code).trim() || null : null,
+          hsn_code: row.hsnCode,
           gst_rate: gstVal,
           status: "active" as const,
         };
 
-        let targetId: string;
-        if (existing) {
-          const { error: updErr } = await supabase.from("products").update(basePayload).eq("id", existing.id);
-          if (updErr) {
-            skippedReasons.push(`${rowLabel} (${prodSku}): ${updErr.message}`);
-            continue;
-          }
-          targetId = existing.id;
+        let newlyCreatedProductId: string | null = null;
+        try {
+          let targetId: string;
+          if (existing) {
+            const { error: updErr } = await supabase.from("products").update(basePayload).eq("id", existing.id);
+            if (updErr) {
+              skippedReasons.push(`${rowLabel} (${prodSku}): ${updErr.message}`);
+              continue;
+            }
+            targetId = existing.id;
 
-          const delta = Math.round((stockQty - existing.available_quantity) * 100) / 100;
-          const { error: invErr } = await supabase.rpc("adjust_product_stock_and_threshold_admin", {
-            p_product_id: targetId,
-            p_quantity_delta: delta,
-            p_low_stock_threshold: existing.low_stock_threshold,
-            p_movement_type: "adjustment",
-            p_notes: "Updated via Excel bulk import",
-          });
-          if (invErr) throw invErr;
-        } else {
-          const { data: created, error: insErr } = await supabase
-            .from("products")
-            .insert(basePayload)
-            .select("id")
-            .single();
-          if (insErr || !created) {
-            skippedReasons.push(`${rowLabel} (${prodSku}): ${insErr?.message || "Insert failed"}`);
-            continue;
-          }
-          targetId = created.id;
-
-          const { error: invErr } = await supabase.from("inventory").insert({
-            product_id: targetId,
-            available_quantity: stockQty,
-            low_stock_threshold: 10,
-          });
-          if (invErr) throw invErr;
-          if (stockQty > 0) {
-            const { error: movErr } = await supabase.from("inventory_movements").insert({
-              product_id: targetId,
-              movement_type: "restock",
-              quantity_delta: stockQty,
-              balance_after: stockQty,
-              reference_type: "excel_import",
-              notes: "Initial stock imported via Excel",
+            const delta = Math.round((stockQty - existing.available_quantity) * 100) / 100;
+            const { error: invErr } = await supabase.rpc("adjust_product_stock_and_threshold_admin", {
+              p_product_id: targetId,
+              p_quantity_delta: delta,
+              p_low_stock_threshold: existing.low_stock_threshold,
+              p_movement_type: "adjustment",
+              p_notes: "Updated via Excel bulk import",
             });
-            if (movErr) throw movErr;
+            if (invErr) throw invErr;
+            existing.available_quantity = stockQty;
+          } else {
+            const { data: created, error: insErr } = await supabase
+              .from("products")
+              .insert(basePayload)
+              .select("id")
+              .single();
+            if (insErr || !created) {
+              skippedReasons.push(`${rowLabel} (${prodSku}): ${insErr?.message || "Insert failed"}`);
+              continue;
+            }
+            targetId = created.id;
+            newlyCreatedProductId = created.id;
+
+            const { error: invErr } = await supabase.from("inventory").insert({
+              product_id: targetId,
+              available_quantity: stockQty,
+              low_stock_threshold: 10,
+            });
+            if (invErr) throw invErr;
+            if (stockQty > 0) {
+              const { error: movErr } = await supabase.from("inventory_movements").insert({
+                product_id: targetId,
+                movement_type: "restock",
+                quantity_delta: stockQty,
+                balance_after: stockQty,
+                reference_type: "excel_import",
+                notes: "Initial stock imported via Excel",
+              });
+              if (movErr) throw movErr;
+            }
+            existingBySku.set(prodSku, {
+              id: targetId,
+              manufacturer_id: id,
+              available_quantity: stockQty,
+              low_stock_threshold: 10,
+            });
           }
-          existingBySku.set(prodSku, {
-            id: targetId,
-            manufacturer_id: id,
-            available_quantity: stockQty,
-            low_stock_threshold: 10,
+
+          const { error: priceErr } = await supabase.rpc("recalculate_product_draft_price", {
+            p_product_id: targetId,
+            p_new_manufacturer_price: Math.round(mfgPriceNum * 100) / 100,
+            p_notes: "Imported from Excel sheet",
           });
+          if (priceErr) throw priceErr;
+
+          usedCategoryIds.add(resolvedCatId);
+          importedCount++;
+        } catch (rowErr) {
+          if (newlyCreatedProductId) {
+            await supabase.from("products").delete().eq("id", newlyCreatedProductId);
+            existingBySku.delete(prodSku);
+          }
+          const msg = rowErr instanceof Error ? rowErr.message : "Failed saving product";
+          skippedReasons.push(`${rowLabel} (${prodSku}): ${msg}`);
         }
+      }
 
-        const { error: priceErr } = await supabase.rpc("recalculate_product_draft_price", {
-          p_product_id: targetId,
-          p_new_manufacturer_price: Math.round(mfgPriceNum * 100) / 100,
-          p_notes: "Imported from Excel sheet",
-        });
-        if (priceErr) throw priceErr;
+      if (usedCategoryIds.size > 0) {
+        const { error: linkErr } = await supabase
+          .from("manufacturer_categories")
+          .upsert(
+            Array.from(usedCategoryIds).map((catId) => ({
+              manufacturer_id: id,
+              category_id: catId,
+            })),
+            { onConflict: "manufacturer_id,category_id", ignoreDuplicates: true }
+          );
+        if (linkErr) {
+          skippedReasons.push(`Category link warning: ${linkErr.message}`);
+        }
+      }
 
-        importedCount++;
+      if (importedCount > 0 || createdCategoryNames.length > 0) {
+        await Promise.all([
+          invalidateCatalogQueries(queryClient),
+          queryClient.invalidateQueries({ queryKey: ["admin-inventory"] }),
+          queryClient.invalidateQueries({ queryKey: ["admin-inventory-movements"] }),
+          queryClient.invalidateQueries({ queryKey: ["admin-categories"] }),
+          queryClient.invalidateQueries({ queryKey: ["customer-categories"] }),
+          queryClient.invalidateQueries({ queryKey: ["customer-all-categories"] }),
+          queryClient.invalidateQueries({ queryKey: ["admin-manufacturer", id] }),
+          queryClient.invalidateQueries({ queryKey: ["admin-manufacturers"] }),
+          queryClient.invalidateQueries({ queryKey: ["admin-margin-rules"] }),
+        ]);
       }
 
       if (importedCount === 0 && skippedReasons.length > 0) {
-        throw new Error(skippedReasons.slice(0, 3).join("; "));
+        setImportFeedback({
+          kind: "error",
+          summary: `No products were imported (${skippedReasons.length} row issue${skippedReasons.length === 1 ? "" : "s"}).`,
+          details: skippedReasons,
+        });
+        toast({
+          title: "Import failed",
+          description: skippedReasons.slice(0, 3).join("; "),
+          type: "error",
+        });
+        return;
+      }
+
+      const categoryNote =
+        createdCategoryNames.length > 0
+          ? ` • Auto-created ${createdCategoryNames.length} categor${createdCategoryNames.length === 1 ? "y" : "ies"}: ${createdCategoryNames.slice(0, 3).join(", ")}${createdCategoryNames.length > 3 ? ` (+${createdCategoryNames.length - 3} more)` : ""}`
+          : "";
+
+      if (skippedReasons.length > 0) {
+        setImportFeedback({
+          kind: "warning",
+          summary: `Imported ${importedCount} product(s)${categoryNote}, with ${skippedReasons.length} skipped row(s):`,
+          details: skippedReasons,
+        });
+        toast({
+          title: `Imported ${importedCount} product(s)`,
+          description: `Skipped ${skippedReasons.length} row(s): ${skippedReasons.slice(0, 2).join("; ")}`,
+          type: "info",
+        });
+        return;
       }
 
       toast({
         title: `Imported ${importedCount} product(s)`,
-        description:
-          skippedReasons.length > 0
-            ? `Skipped ${skippedReasons.length} row(s): ${skippedReasons.slice(0, 2).join("; ")}`
-            : undefined,
-        type: skippedReasons.length > 0 ? "info" : "success",
+        description: categoryNote ? categoryNote.replace(/^ • /, "") : undefined,
+        type: "success",
       });
       setImportOpen(false);
-      await Promise.all([
-        invalidateCatalogQueries(queryClient),
-        queryClient.invalidateQueries({ queryKey: ["admin-inventory"] }),
-        queryClient.invalidateQueries({ queryKey: ["admin-inventory-movements"] }),
-      ]);
     } catch (err) {
-      toast({ title: "Import failed", description: err instanceof Error ? err.message : "Invalid file", type: "error" });
+      const msg = err instanceof Error ? err.message : "Invalid file";
+      setImportFeedback({
+        kind: "error",
+        summary: msg,
+        details: [],
+      });
+      toast({ title: "Import failed", description: msg, type: "error" });
     } finally {
       setImporting(false);
       e.target.value = "";
@@ -744,7 +901,14 @@ export function ManufacturerDetailPage() {
                 ? `Unpublish Filtered (${mfgPublishedTargets.length})`
                 : `Unpublish All (${mfgPublishedTargets.length})`}
             </Button>
-            <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setImportFeedback(null);
+                setImportOpen(true);
+              }}
+            >
               <FileSpreadsheet className="h-4 w-4" />
               Bulk Excel Import
             </Button>
@@ -1137,24 +1301,84 @@ export function ManufacturerDetailPage() {
       </Dialog>
 
       {/* Bulk Excel Import Dialog */}
-      <Dialog open={importOpen} onOpenChange={setImportOpen}>
-        <DialogContent>
+      <Dialog
+        open={importOpen}
+        onOpenChange={(open) => {
+          if (importing && !open) return;
+          if (!open) setImportFeedback(null);
+          setImportOpen(open);
+        }}
+      >
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Bulk Excel Product Import</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <p className="text-sm text-slate-600">
               Upload an Excel (<code>.xlsx</code> / <code>.csv</code>) file containing columns:{" "}
-              <code>name, sku, category_name, description, unit_of_measurement, min_order_quantity, hsn_code, gst_rate, manufacturer_price, available_quantity</code>.
+              <code className="break-words text-xs">
+                name, sku, category_name, description, unit_of_measurement, min_order_quantity, hsn_code, gst_rate,
+                manufacturer_price, available_quantity
+              </code>
+              . Common column headers like <code>Product Name</code>, <code>Category</code>, <code>Price</code>, and{" "}
+              <code>Stock</code> are also recognized.
             </p>
+
+            <label className="flex cursor-pointer items-start gap-2.5 rounded-md border border-slate-200 bg-slate-50/70 p-3 text-xs text-slate-800">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                checked={autoCreateCategories}
+                onChange={(e) => setAutoCreateCategories(e.target.checked)}
+                disabled={importing}
+              />
+              <span>
+                <strong>Automatically create new categories found in the spreadsheet</strong> and link them to this
+                manufacturer (recommended).
+              </span>
+            </label>
+
+            {importFeedback && (
+              <div
+                className={`space-y-1.5 rounded-md border p-3 text-xs ${
+                  importFeedback.kind === "error"
+                    ? "border-red-200 bg-red-50 text-red-900"
+                    : importFeedback.kind === "warning"
+                      ? "border-amber-200 bg-amber-50 text-amber-950"
+                      : "border-emerald-200 bg-emerald-50 text-emerald-950"
+                }`}
+              >
+                <p className="font-semibold">{importFeedback.summary}</p>
+                {importFeedback.details.length > 0 && (
+                  <ul className="max-h-40 list-disc space-y-0.5 overflow-y-auto pl-4">
+                    {importFeedback.details.map((detail, idx) => (
+                      <li key={idx} className="break-words">
+                        {detail}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-3">
-              <Button type="button" variant="outline" size="sm" onClick={downloadImportTemplate}>
+              <Button type="button" variant="outline" size="sm" onClick={downloadImportTemplate} disabled={importing}>
                 Download Template (.xlsx)
               </Button>
-              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md bg-primary px-3.5 py-2 text-xs font-medium text-white hover:bg-primary/90">
+              <label
+                className={`inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-2 text-xs font-medium text-white ${
+                  importing ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-primary/90"
+                }`}
+              >
                 {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-                <span>Select Excel File</span>
-                <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleExcelImport} />
+                <span>{importing ? "Importing Products..." : "Select Excel File"}</span>
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  className="hidden"
+                  disabled={importing}
+                  onChange={handleExcelImport}
+                />
               </label>
             </div>
           </div>
