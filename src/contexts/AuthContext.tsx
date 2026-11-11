@@ -72,16 +72,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       is_active: userRow.is_active,
       created_at: userRow.created_at,
     };
-    setUserProfile(mappedUser);
 
     if (roleName === "customer") {
-      const { data: custRow } = await supabase
+      const { data: custRow, error: custErr } = await supabase
         .from("customers")
         .select("*")
         .eq("user_id", userId)
         .single();
-      setCustomerProfile((custRow as CustomerProfile) ?? null);
+      if (custErr || !custRow || custRow.status !== "active") {
+        setUserProfile(null);
+        setCustomerProfile(null);
+        return null;
+      }
+      setUserProfile(mappedUser);
+      setCustomerProfile(custRow as CustomerProfile);
     } else {
+      setUserProfile(mappedUser);
       setCustomerProfile(null);
     }
 

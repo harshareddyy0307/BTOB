@@ -100,6 +100,13 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    if (!["active", "inactive", "suspended"].includes(status)) {
+      return new Response(JSON.stringify({ error: "Status must be active, inactive, or suspended" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const { data: customerRole, error: roleErr } = await adminClient
       .from("roles")
       .select("id")
@@ -129,6 +136,19 @@ Deno.serve(async (req: Request) => {
     }
 
     const newUserId = authData.user.id;
+
+    if (status !== "active") {
+      const { error: banErr } = await adminClient.auth.admin.updateUserById(newUserId, {
+        ban_duration: "876000h",
+      });
+      if (banErr) {
+        await adminClient.auth.admin.deleteUser(newUserId);
+        return new Response(JSON.stringify({ error: banErr.message }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
 
     const { error: userInsertErr } = await adminClient.from("users").insert({
       id: newUserId,

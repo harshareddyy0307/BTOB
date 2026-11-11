@@ -43,6 +43,7 @@ export function SettingsPage() {
   const [staffPassword, setStaffPassword] = useState("");
   const [staffRole, setStaffRole] = useState<"staff" | "admin">("staff");
   const [creatingStaff, setCreatingStaff] = useState(false);
+  const [togglingUserId, setTogglingUserId] = useState<string | null>(null);
 
   const { data: settings } = useQuery({
     queryKey: ["agency-settings-admin"],
@@ -177,7 +178,8 @@ export function SettingsPage() {
   };
 
   const toggleStaffStatus = async (u: AppUser) => {
-    if (!isOwnerAdmin) return;
+    if (!isOwnerAdmin || togglingUserId) return;
+    setTogglingUserId(u.id);
     try {
       await invokeAuthenticatedFunction(
         "manage-staff-user",
@@ -189,9 +191,11 @@ export function SettingsPage() {
         "Failed to update user status"
       );
       toast({ title: `${u.full_name} ${!u.is_active ? "activated" : "deactivated"}`, type: "info" });
-      queryClient.invalidateQueries({ queryKey: ["admin-staff-users"] });
+      await queryClient.invalidateQueries({ queryKey: ["admin-staff-users"] });
     } catch (err) {
       toast({ title: "Update failed", description: err instanceof Error ? err.message : "Error", type: "error" });
+    } finally {
+      setTogglingUserId(null);
     }
   };
 
@@ -506,9 +510,14 @@ export function SettingsPage() {
                               variant="ghost"
                               size="sm"
                               onClick={() => toggleStaffStatus(u)}
+                              disabled={togglingUserId === u.id}
                               title={u.is_active ? "Deactivate" : "Activate"}
                             >
-                              <Power className={u.is_active ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-emerald-600"} />
+                              {togglingUserId === u.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
+                              ) : (
+                                <Power className={u.is_active ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-emerald-600"} />
+                              )}
                               {u.is_active ? "Deactivate" : "Activate"}
                             </Button>
                           )}

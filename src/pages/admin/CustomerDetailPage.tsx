@@ -1,8 +1,8 @@
 import React, { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, Trash2, Loader2, IndianRupee } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { ArrowLeft, Plus, Trash2, Loader2, IndianRupee, Power } from "lucide-react";
+import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import type { AdminProduct, CustomerProfile, InvoiceRecord, OrderRecord } from "@/types/database";
@@ -26,6 +26,7 @@ export function CustomerDetailPage() {
   const [selectedProdId, setSelectedProdId] = useState("");
   const [customPrice, setCustomPrice] = useState("");
   const [savingOverride, setSavingOverride] = useState(false);
+  const [togglingStatus, setTogglingStatus] = useState(false);
   const [paymentOrder, setPaymentOrder] = useState<OrderPaymentTarget | null>(null);
 
   const { data: customer, isLoading } = useQuery({
@@ -120,6 +121,45 @@ export function CustomerDetailPage() {
     toast({ title: "Custom price removed", type: "info" });
   };
 
+  const toggleCustomerStatus = async () => {
+    if (!customer || togglingStatus) return;
+    const nextActive = customer.status !== "active";
+    const nextStatus = nextActive ? "active" : "inactive";
+    setTogglingStatus(true);
+    try {
+      if (customer.user_id) {
+        await invokeAuthenticatedFunction(
+          "manage-staff-user",
+          {
+            action: "toggle_user_status",
+            user_id: customer.user_id,
+            is_active: nextActive,
+            customer_status: nextStatus,
+          },
+          "Failed to update customer status"
+        );
+      } else {
+        const { error } = await supabase
+          .from("customers")
+          .update({ status: nextStatus })
+          .eq("id", customer.id);
+        if (error) throw error;
+      }
+      toast({
+        title: `${customer.business_name} is now ${nextActive ? "Active" : "Inactive"}`,
+        type: nextActive ? "success" : "info",
+      });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["admin-customer-detail", customer.id] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-customers"] }),
+      ]);
+    } catch (err) {
+      toast({ title: "Status update failed", description: err instanceof Error ? err.message : "Error", type: "error" });
+    } finally {
+      setTogglingStatus(false);
+    }
+  };
+
   if (isLoading) return <div className="py-12 text-center text-sm text-slate-500">Loading customer profile...</div>;
   if (!customer) return <div className="py-12 text-center text-sm text-red-600">Customer not found.</div>;
 
@@ -133,12 +173,27 @@ export function CustomerDetailPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <Link to="/admin/customers" className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-600 hover:text-slate-900">
           <ArrowLeft className="h-4 w-4" />
           Back to Customers
         </Link>
-        <StatusBadge status={customer.status} />
+        <div className="flex items-center gap-2">
+          <StatusBadge status={customer.status} />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={toggleCustomerStatus}
+            disabled={togglingStatus}
+          >
+            {togglingStatus ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Power className={customer.status === "active" ? "h-3.5 w-3.5 text-amber-600" : "h-3.5 w-3.5 text-emerald-600"} />
+            )}
+            {customer.status === "active" ? "Deactivate" : "Activate"}
+          </Button>
+        </div>
       </div>
 
       <Card>

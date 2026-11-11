@@ -4,13 +4,15 @@ import { Loader2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import type { UserRole } from "@/types/database";
 
+import { Button } from "@/components/ui/button";
+
 interface ProtectedRouteProps {
   allowedRoles: UserRole[];
   children: React.ReactNode;
 }
 
 export function ProtectedRoute({ allowedRoles, children }: ProtectedRouteProps) {
-  const { session, role, customerProfile, loading } = useAuth();
+  const { session, role, customerProfile, loading, signOut } = useAuth();
   const location = useLocation();
 
   if (loading) {
@@ -41,6 +43,9 @@ export function ProtectedRoute({ allowedRoles, children }: ProtectedRouteProps) 
             Your business account status is currently <strong>{customerProfile.status}</strong>. Please contact your
             supply agency administrator for assistance.
           </p>
+          <Button variant="outline" size="sm" className="mt-4" onClick={() => void signOut()}>
+            Sign Out
+          </Button>
         </div>
       </div>
     );

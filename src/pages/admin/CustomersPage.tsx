@@ -24,6 +24,7 @@ export function CustomersPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<CustomerProfile | null>(null);
   const [saving, setSaving] = useState(false);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
 
   const [businessName, setBusinessName] = useState("");
   const [ownerName, setOwnerName] = useState("");
@@ -89,23 +90,42 @@ export function CustomersPage() {
     setSaving(true);
     try {
       if (editing) {
+        const updatePayload: Record<string, unknown> = {
+          business_name: businessName.trim(),
+          owner_name: ownerName.trim(),
+          phone: phone.trim(),
+          business_address: address.trim(),
+          city: city.trim() || null,
+          state: stateVal.trim() || "Telangana",
+          pincode: pincode.trim() || null,
+          gst_number: gstNumber.trim().toUpperCase() || null,
+          business_category: businessCategory.trim() || null,
+        };
+        if (!editing.user_id) {
+          updatePayload.status = status;
+        }
+
         const { error } = await supabase
           .from("customers")
-          .update({
-            business_name: businessName.trim(),
-            owner_name: ownerName.trim(),
-            phone: phone.trim(),
-            business_address: address.trim(),
-            city: city.trim() || null,
-            state: stateVal.trim() || "Telangana",
-            pincode: pincode.trim() || null,
-            gst_number: gstNumber.trim().toUpperCase() || null,
-            business_category: businessCategory.trim() || null,
-            status,
-          })
+          .update(updatePayload)
           .eq("id", editing.id);
         if (error) throw error;
+
+        if (editing.user_id && status !== editing.status) {
+          await invokeAuthenticatedFunction(
+            "manage-staff-user",
+            {
+              action: "toggle_user_status",
+              user_id: editing.user_id,
+              is_active: status === "active",
+              customer_status: status,
+            },
+            "Failed to sync customer login status"
+          );
+        }
+
         toast({ title: "Customer business updated", type: "success" });
+        queryClient.invalidateQueries({ queryKey: ["admin-customer-detail", editing.id] });
       } else {
         await invokeAuthenticatedFunction(
           "create-customer-user",
@@ -146,41 +166,41 @@ export function CustomersPage() {
   };
 
   const toggleStatus = async (c: CustomerProfile) => {
+    if (togglingId) return;
     const nextActive = c.status !== "active";
+    const nextStatus = nextActive ? "active" : "inactive";
+    setTogglingId(c.id);
     try {
       if (c.user_id) {
-        try {
-          await invokeAuthenticatedFunction(
-            "manage-staff-user",
-            { action: "toggle_user_status", user_id: c.user_id, is_active: nextActive },
-            "Failed to update user status"
-          );
-        } catch (fnErr) {
-          const msg = fnErr instanceof Error ? fnErr.message : "";
-          if (/expired|signed out|sign in/i.test(msg)) {
-            throw fnErr;
-          }
-          // Staff might not have admin-level ban rights, fallback to updating customer table status
-          const { error: custErr } = await supabase
-            .from("customers")
-            .update({ status: nextActive ? "active" : "inactive" })
-            .eq("id", c.id);
-          if (custErr) throw custErr;
-        }
+        await invokeAuthenticatedFunction(
+          "manage-staff-user",
+          {
+            action: "toggle_user_status",
+            user_id: c.user_id,
+            is_active: nextActive,
+            customer_status: nextStatus,
+          },
+          "Failed to update customer status"
+        );
       } else {
         const { error } = await supabase
           .from("customers")
-          .update({ status: nextActive ? "active" : "inactive" })
+          .update({ status: nextStatus })
           .eq("id", c.id);
         if (error) throw error;
       }
       toast({
-        title: `Customer ${nextActive ? "activated" : "deactivated"}`,
-        type: "info",
+        title: `${c.business_name} ${nextActive ? "activated" : "deactivated"}`,
+        type: nextActive ? "success" : "info",
       });
-      queryClient.invalidateQueries({ queryKey: ["admin-customers"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["admin-customers"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-customer-detail", c.id] }),
+      ]);
     } catch (err) {
       toast({ title: "Status update failed", description: err instanceof Error ? err.message : "Error", type: "error" });
+    } finally {
+      setTogglingId(null);
     }
   };
 
@@ -302,9 +322,15 @@ export function CustomersPage() {
                           variant="ghost"
                           size="icon"
                           onClick={() => toggleStatus(c)}
-                          title={c.status === "active" ? "Deactivate" : "Activate"}
+                          disabled={togglingId === c.id}
+                          aria-label={c.status === "active" ? `Deactivate ${c.business_name}` : `Activate ${c.business_name}`}
+                          title={c.status === "active" ? "Deactivate customer" : "Activate customer"}
                         >
-                          <Power className={c.status === "active" ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-emerald-600"} />
+                          {togglingId === c.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
+                          ) : (
+                            <Power className={c.status === "active" ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-emerald-600"} />
+                          )}
                         </Button>
                       </div>
                     </TableCell>
