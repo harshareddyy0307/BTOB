@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/components/shared/StatusBadge";
+import { useToast } from "@/components/ui/toast";
 import {
   CustomerPaymentNoticeDialog,
   type CustomerNoticeOrderTarget,
@@ -26,6 +27,7 @@ import {
 export function CustomerOrderDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { customerProfile, branding } = useAuth();
+  const { toast } = useToast();
   const sym = branding.currency_symbol || "₹";
   const [noticeOrder, setNoticeOrder] = useState<CustomerNoticeOrderTarget | null>(null);
 
@@ -142,17 +144,17 @@ export function CustomerOrderDetailPage() {
 
       {/* Header & Order Stepper */}
       <Card>
-        <CardContent className="space-y-6 p-6">
+        <CardContent className="space-y-5 p-4 sm:space-y-6 sm:p-6">
           <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
             <div>
-              <h1 className="text-2xl font-bold text-slate-900">{order.order_number}</h1>
+              <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">{order.order_number}</h1>
               <p className="mt-1 text-xs text-slate-500">
                 Placed on {formatDateTime(order.placed_at)} &bull; Last updated {formatDateTime(order.updated_at)}
               </p>
             </div>
             <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-left sm:text-right">
               <p className="text-xs font-medium uppercase text-slate-500">Order Grand Total</p>
-              <p className="text-2xl font-bold text-slate-900">{formatCurrency(order.total_amount, sym)}</p>
+              <p className="text-xl font-bold text-slate-900 sm:text-2xl">{formatCurrency(order.total_amount, sym)}</p>
               <p className="text-xs font-medium text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</p>
               <p className={cn("text-xs font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
                 {isCancelled ? "Cancelled" : `Amount Due: ${formatCurrency(dueAmt, sym)}`}
@@ -210,39 +212,66 @@ export function CustomerOrderDetailPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Product</TableHead>
-                <TableHead>HSN</TableHead>
-                <TableHead>Quantity</TableHead>
-                <TableHead>Unit Selling Price</TableHead>
-                <TableHead>GST</TableHead>
-                <TableHead className="text-right">Line Total</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {items.map((item) => (
-                <TableRow key={item.id}>
-                  <TableCell>
-                    <p className="font-medium text-slate-900">{item.product_name_snapshot}</p>
-                    <p className="font-mono text-xs text-slate-500">{item.sku_snapshot}</p>
-                  </TableCell>
-                  <TableCell className="font-mono text-xs text-slate-500">{item.hsn_snapshot || "—"}</TableCell>
-                  <TableCell className="font-medium">
-                    {formatQty(item.quantity)} {item.unit_snapshot}
-                  </TableCell>
-                  <TableCell>{formatCurrency(item.unit_selling_price, sym)}</TableCell>
-                  <TableCell className="text-xs text-slate-600">
-                    {item.gst_rate}% ({formatCurrency(item.tax_amount, sym)})
-                  </TableCell>
-                  <TableCell className="text-right font-semibold text-slate-900">
-                    {formatCurrency(item.line_total, sym)}
-                  </TableCell>
+          <div className="divide-y divide-slate-100 md:hidden">
+            {items.map((item) => (
+              <div key={item.id} className="space-y-1.5 p-4 text-xs">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium text-slate-900">{item.product_name_snapshot}</p>
+                    <p className="font-mono text-slate-500">
+                      {item.sku_snapshot}
+                      {item.hsn_snapshot ? ` • HSN ${item.hsn_snapshot}` : ""}
+                    </p>
+                  </div>
+                  <p className="text-sm font-semibold text-slate-900">{formatCurrency(item.line_total, sym)}</p>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-slate-600">
+                  <span>
+                    {formatQty(item.quantity)} {item.unit_snapshot} &times; {formatCurrency(item.unit_selling_price, sym)}
+                  </span>
+                  <span>
+                    GST {item.gst_rate}% ({formatCurrency(item.tax_amount, sym)})
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Product</TableHead>
+                  <TableHead>HSN</TableHead>
+                  <TableHead>Quantity</TableHead>
+                  <TableHead>Unit Selling Price</TableHead>
+                  <TableHead>GST</TableHead>
+                  <TableHead className="text-right">Line Total</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {items.map((item) => (
+                  <TableRow key={item.id}>
+                    <TableCell>
+                      <p className="font-medium text-slate-900">{item.product_name_snapshot}</p>
+                      <p className="font-mono text-xs text-slate-500">{item.sku_snapshot}</p>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-slate-500">{item.hsn_snapshot || "—"}</TableCell>
+                    <TableCell className="font-medium">
+                      {formatQty(item.quantity)} {item.unit_snapshot}
+                    </TableCell>
+                    <TableCell>{formatCurrency(item.unit_selling_price, sym)}</TableCell>
+                    <TableCell className="text-xs text-slate-600">
+                      {item.gst_rate}% ({formatCurrency(item.tax_amount, sym)})
+                    </TableCell>
+                    <TableCell className="text-right font-semibold text-slate-900">
+                      {formatCurrency(item.line_total, sym)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 
@@ -322,7 +351,7 @@ export function CustomerOrderDetailPage() {
 
             {invoice ? (
               <div className="mt-4 space-y-3 rounded-lg border border-blue-200 bg-blue-50/50 p-4">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <p className="text-xs font-semibold uppercase text-blue-800">GST Tax Invoice Issued</p>
                     <p className="font-bold text-slate-900">{invoice.invoice_number}</p>
@@ -330,28 +359,34 @@ export function CustomerOrderDetailPage() {
                       Date: {formatDate(invoice.invoice_date)} &bull; Due: {formatDate(invoice.due_date)}
                     </p>
                   </div>
-                  <StatusBadge status={invoice.payment_status} />
+                  <StatusBadge status={isCancelled ? "cancelled" : invoice.payment_status} />
                 </div>
 
-                {agency && customerProfile && (
-                  <Button
-                    size="sm"
-                    className="w-full"
-                    onClick={() =>
-                      generateCustomerInvoicePdf({
-                        agency,
-                        invoice,
-                        customer: customerProfile,
-                        order,
-                        items,
-                        payments: recordedPayments,
-                      })
+                <Button
+                  size="sm"
+                  className="w-full"
+                  onClick={() => {
+                    if (!agency || !customerProfile) {
+                      toast({
+                        title: "Cannot generate Invoice PDF",
+                        description: "Agency settings are still loading.",
+                        type: "error",
+                      });
+                      return;
                     }
-                  >
-                    <FileDown className="h-4 w-4" />
-                    Download Tax Invoice PDF
-                  </Button>
-                )}
+                    generateCustomerInvoicePdf({
+                      agency,
+                      invoice,
+                      customer: customerProfile,
+                      order,
+                      items,
+                      payments: recordedPayments,
+                    });
+                  }}
+                >
+                  <FileDown className="h-4 w-4" />
+                  Download Tax Invoice PDF
+                </Button>
               </div>
             ) : (
               <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
@@ -366,14 +401,14 @@ export function CustomerOrderDetailPage() {
                 </p>
                 <div className="divide-y divide-slate-100 rounded-md border border-slate-200">
                   {recordedPayments.map((p) => (
-                    <div key={p.id} className="flex items-center justify-between px-3 py-2 text-xs">
-                      <div>
-                        <p className="font-medium text-slate-900">
+                    <div key={p.id} className="flex items-center justify-between gap-2 px-3 py-2 text-xs">
+                      <div className="min-w-0">
+                        <p className="truncate font-medium text-slate-900">
                           {p.payment_method} {p.reference_number ? `(${p.reference_number})` : ""}
                         </p>
                         <p className="text-[11px] text-slate-500">{formatDate(p.payment_date)}</p>
                       </div>
-                      <span className="font-semibold text-emerald-700">{formatCurrency(p.amount, sym)}</span>
+                      <span className="shrink-0 font-semibold text-emerald-700">{formatCurrency(p.amount, sym)}</span>
                     </div>
                   ))}
                 </div>

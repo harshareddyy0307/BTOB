@@ -14,7 +14,8 @@ import { useToast } from "@/components/ui/toast";
 
 export function CustomerProductDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { customerProfile } = useAuth();
+  const { customerProfile, branding } = useAuth();
+  const sym = branding.currency_symbol || "₹";
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -32,11 +33,15 @@ export function CustomerProductDetailPage() {
     queryFn: async () => {
       const { data, error } = await supabase.from("v_customer_catalog").select("*").eq("id", id!).single();
       if (error) throw error;
-      const item = data as CustomerCatalogProduct;
-      setQty(String(Math.max(1, Number(item.min_order_quantity) || 1)));
-      return item;
+      return data as CustomerCatalogProduct;
     },
   });
+
+  useEffect(() => {
+    if (product) {
+      setQty(String(Math.max(1, Number(product.min_order_quantity) || 1)));
+    }
+  }, [product?.id, product?.min_order_quantity]);
 
   if (isLoading) return <div className="py-12 text-center text-sm text-slate-500">Loading product...</div>;
   if (!product) return <div className="py-12 text-center text-sm text-red-600">Product not found or unavailable.</div>;
@@ -49,7 +54,7 @@ export function CustomerProductDetailPage() {
   const handleAdd = async () => {
     if (!customerProfile) return;
     const requested = Number(qty);
-    if (Number.isNaN(requested) || requested < minQty) {
+    if (!Number.isFinite(requested) || requested < minQty) {
       toast({ title: `Minimum order quantity is ${formatQty(minQty)}`, type: "error" });
       return;
     }
@@ -82,8 +87,8 @@ export function CustomerProductDetailPage() {
       </Link>
 
       <Card>
-        <CardContent className="grid gap-8 p-6 md:grid-cols-2">
-          <div className="space-y-3">
+        <CardContent className="grid gap-6 p-4 sm:p-6 md:grid-cols-2 md:gap-8">
+          <div className="min-w-0 space-y-3">
             <div className="aspect-square overflow-hidden rounded-lg border bg-slate-100">
               {mainImg ? (
                 <img src={mainImg} alt={product.name} className="h-full w-full object-cover" />
@@ -111,22 +116,22 @@ export function CustomerProductDetailPage() {
             )}
           </div>
 
-          <div className="space-y-5">
+          <div className="min-w-0 space-y-5">
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs font-semibold uppercase tracking-wider text-blue-700">
                   {product.category_name}
                 </span>
                 <StatusBadge status={product.stock_status} />
               </div>
-              <h1 className="mt-2 text-2xl font-bold text-slate-900">{product.name}</h1>
+              <h1 className="mt-2 text-xl font-bold text-slate-900 sm:text-2xl">{product.name}</h1>
               <p className="mt-1 font-mono text-xs text-slate-500">SKU: {product.sku}</p>
             </div>
 
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <p className="text-3xl font-bold text-slate-900">
-                  {formatCurrency(product.selling_price)}
+                <p className="text-2xl font-bold text-slate-900 sm:text-3xl">
+                  {formatCurrency(product.selling_price, sym)}
                   <span className="text-sm font-normal text-slate-500"> / {product.unit_of_measurement}</span>
                 </p>
                 {product.has_custom_price && (
@@ -159,14 +164,14 @@ export function CustomerProductDetailPage() {
               </div>
             </div>
 
-            <div className="flex items-center gap-3 pt-2">
+            <div className="flex items-center gap-2.5 pt-2 sm:gap-3">
               <Input
                 type="number"
                 min={minQty}
                 max={Math.max(minQty, Number(product.available_quantity))}
                 value={qty}
                 onChange={(e) => setQty(e.target.value)}
-                className="w-28"
+                className="w-24 sm:w-28"
                 disabled={outOfStock}
               />
               <Button className="flex-1" disabled={outOfStock || adding} onClick={handleAdd}>

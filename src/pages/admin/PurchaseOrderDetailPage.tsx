@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
-import { getManufacturerAssetSignedUrl, uploadStorageFile } from "@/lib/storage";
+import { getManufacturerAssetSignedUrl, MANUFACTURER_INVOICE_ACCEPT, uploadStorageFile } from "@/lib/storage";
 import { generatePurchaseOrderPdf } from "@/lib/pdfGenerator";
 import { formatCurrency, formatDate, formatQty } from "@/lib/utils";
 import {
@@ -198,6 +198,7 @@ export function PurchaseOrderDetailPage() {
     } catch (err) {
       toast({ title: "Upload failed", description: err instanceof Error ? err.message : "Error", type: "error" });
     } finally {
+      e.target.value = "";
       setUploadingInv(false);
     }
   };
@@ -236,31 +237,37 @@ export function PurchaseOrderDetailPage() {
           <ArrowLeft className="h-4 w-4" />
           Back to Purchase Orders
         </Link>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={po.status} />
-          {agency && po.manufacturers && (
-            <Button
-              size="sm"
-              onClick={() =>
-                generatePurchaseOrderPdf({
-                  agency,
-                  po,
-                  manufacturer: po.manufacturers!,
-                  items,
-                  sourceOrderNumber: po.orders?.order_number ?? null,
-                })
+          <Button
+            size="sm"
+            onClick={() => {
+              if (!agency || !po.manufacturers) {
+                toast({
+                  title: "Cannot generate PO PDF",
+                  description: "Agency or manufacturer details are still loading.",
+                  type: "error",
+                });
+                return;
               }
-            >
-              <FileDown className="h-4 w-4" />
-              Download PO PDF
-            </Button>
-          )}
+              generatePurchaseOrderPdf({
+                agency,
+                po,
+                manufacturer: po.manufacturers,
+                items,
+                sourceOrderNumber: po.orders?.order_number ?? null,
+              });
+            }}
+          >
+            <FileDown className="h-4 w-4" />
+            Download PO PDF
+          </Button>
         </div>
       </div>
 
       {/* Staff-Managed Supplier Notice */}
-      <div className="flex items-center gap-2.5 rounded-lg border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600 shadow-sm">
-        <ShieldAlert className="h-4 w-4 shrink-0 text-blue-700" />
+      <div className="flex items-start gap-2.5 rounded-lg border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600 shadow-sm sm:items-center">
+        <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-blue-700 sm:mt-0" />
         <span>
           <strong>Agency-Managed Procurement:</strong> Manufacturers do not log in to this platform. Staff dispatch PDFs externally and manually record supplier confirmations &amp; invoices here.
         </span>
@@ -269,10 +276,10 @@ export function PurchaseOrderDetailPage() {
       {/* Summary + Manufacturer Info */}
       <div className="grid gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-2">
-          <CardContent className="p-6 space-y-4">
+          <CardContent className="space-y-4 p-4 sm:p-6">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
               <div>
-                <h1 className="text-2xl font-bold text-slate-900">{po.po_number}</h1>
+                <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">{po.po_number}</h1>
                 <p className="mt-1 text-xs text-slate-500">
                   Created {formatDate(po.created_at)}
                   {po.orders && (
@@ -286,7 +293,7 @@ export function PurchaseOrderDetailPage() {
                   )}
                 </p>
               </div>
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-right">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-left sm:text-right">
                 <p className="text-[11px] font-semibold uppercase text-slate-500">PO Grand Total (Mfg Cost)</p>
                 <p className="text-xl font-bold text-slate-900">{formatCurrency(po.total_amount, sym)}</p>
                 <p className="text-[11px] text-slate-500">
@@ -361,37 +368,73 @@ export function PurchaseOrderDetailPage() {
           <CardTitle>Ordered Products at Original Manufacturer Prices ({items.length})</CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Product &amp; SKU</TableHead>
-                <TableHead>Quantity</TableHead>
-                <TableHead>Mfg Unit Price</TableHead>
-                <TableHead>GST %</TableHead>
-                <TableHead>Tax Amount</TableHead>
-                <TableHead className="text-right">Line Total</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {items.map((it) => (
-                <TableRow key={it.id}>
-                  <TableCell>
-                    <p className="font-medium text-slate-900">{it.product_name_snapshot}</p>
-                    <p className="font-mono text-xs text-slate-500">{it.sku_snapshot}</p>
-                  </TableCell>
-                  <TableCell className="font-medium">
-                    {formatQty(it.quantity)} {it.unit_snapshot}
-                  </TableCell>
-                  <TableCell>{formatCurrency(it.unit_manufacturer_price, sym)}</TableCell>
-                  <TableCell className="text-xs text-slate-600">{it.gst_rate}%</TableCell>
-                  <TableCell className="text-xs text-slate-600">{formatCurrency(it.tax_amount, sym)}</TableCell>
-                  <TableCell className="text-right font-semibold text-slate-900">
-                    {formatCurrency(it.line_total, sym)}
-                  </TableCell>
+          <div className="divide-y divide-slate-100 md:hidden">
+            {items.map((it) => (
+              <div key={it.id} className="space-y-2 p-4 text-xs">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-slate-900">{it.product_name_snapshot}</p>
+                    <p className="font-mono text-slate-500">{it.sku_snapshot}</p>
+                  </div>
+                  <p className="shrink-0 text-sm font-bold text-slate-900">{formatCurrency(it.line_total, sym)}</p>
+                </div>
+                <div className="grid grid-cols-2 gap-2 rounded-md border border-slate-100 bg-slate-50 p-2.5">
+                  <div>
+                    <span className="text-slate-500">Qty: </span>
+                    <strong>
+                      {formatQty(it.quantity)} {it.unit_snapshot}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Unit Cost: </span>
+                    <strong>{formatCurrency(it.unit_manufacturer_price, sym)}</strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">GST %: </span>
+                    <strong>{it.gst_rate}%</strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Tax: </span>
+                    <strong>{formatCurrency(it.tax_amount, sym)}</strong>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Product &amp; SKU</TableHead>
+                  <TableHead>Quantity</TableHead>
+                  <TableHead>Mfg Unit Price</TableHead>
+                  <TableHead>GST %</TableHead>
+                  <TableHead>Tax Amount</TableHead>
+                  <TableHead className="text-right">Line Total</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {items.map((it) => (
+                  <TableRow key={it.id}>
+                    <TableCell>
+                      <p className="font-medium text-slate-900">{it.product_name_snapshot}</p>
+                      <p className="font-mono text-xs text-slate-500">{it.sku_snapshot}</p>
+                    </TableCell>
+                    <TableCell className="font-medium">
+                      {formatQty(it.quantity)} {it.unit_snapshot}
+                    </TableCell>
+                    <TableCell>{formatCurrency(it.unit_manufacturer_price, sym)}</TableCell>
+                    <TableCell className="text-xs text-slate-600">{it.gst_rate}%</TableCell>
+                    <TableCell className="text-xs text-slate-600">{formatCurrency(it.tax_amount, sym)}</TableCell>
+                    <TableCell className="text-right font-semibold text-slate-900">
+                      {formatCurrency(it.line_total, sym)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 
@@ -465,7 +508,7 @@ export function PurchaseOrderDetailPage() {
               <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">
                 {uploadingInv ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
                 <span>{mfgInvPath ? "Replace Mfg Invoice File" : "Upload Mfg Invoice (PDF/Image)"}</span>
-                <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUploadMfgInvoice} />
+                <input type="file" accept={MANUFACTURER_INVOICE_ACCEPT} className="hidden" onChange={handleUploadMfgInvoice} />
               </label>
 
               {signedInvUrl && (

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -50,6 +50,29 @@ export function AdminLayout() {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const notifContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!notifOpen) return;
+    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
+      if (notifContainerRef.current && !notifContainerRef.current.contains(e.target as Node)) {
+        setNotifOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setNotifOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [notifOpen]);
 
   const { data: notifications = [], refetch: refetchNotifs } = useQuery({
     queryKey: ["admin-notifications"],
@@ -115,26 +138,24 @@ export function AdminLayout() {
       <aside
         className={cn(
           "fixed inset-y-0 left-0 z-50 flex flex-col border-r border-slate-200 bg-white transition-all duration-200 lg:static",
-          collapsed ? "w-[72px]" : "w-64",
+          collapsed ? "w-64 lg:w-[72px]" : "w-64",
           mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         )}
       >
         <div className="flex h-16 items-center justify-between border-b border-slate-200 px-4">
-          {!collapsed && (
-            <div className="flex min-w-0 items-center gap-2.5">
-              {branding.logo_url && (
-                <img
-                  src={branding.logo_url}
-                  alt={branding.agency_name}
-                  className="h-8 w-8 shrink-0 rounded border border-slate-200 bg-white object-contain p-0.5"
-                />
-              )}
-              <div className="min-w-0">
-                <p className="truncate text-sm font-bold tracking-tight text-slate-900">{branding.agency_name}</p>
-                <p className="text-[11px] font-medium uppercase tracking-wider text-blue-700">Admin Operations</p>
-              </div>
+          <div className={cn("flex min-w-0 items-center gap-2.5", collapsed && "lg:hidden")}>
+            {branding.logo_url && (
+              <img
+                src={branding.logo_url}
+                alt={branding.agency_name}
+                className="h-8 w-8 shrink-0 rounded border border-slate-200 bg-white object-contain p-0.5"
+              />
+            )}
+            <div className="min-w-0">
+              <p className="truncate text-sm font-bold tracking-tight text-slate-900">{branding.agency_name}</p>
+              <p className="text-[11px] font-medium uppercase tracking-wider text-blue-700">Admin Operations</p>
             </div>
-          )}
+          </div>
           <button
             type="button"
             onClick={() => setCollapsed((c) => !c)}
@@ -147,6 +168,7 @@ export function AdminLayout() {
             type="button"
             onClick={() => setMobileOpen(false)}
             className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 lg:hidden"
+            aria-label="Close navigation menu"
           >
             <X className="h-4 w-4" />
           </button>
@@ -166,15 +188,20 @@ export function AdminLayout() {
                     isActive
                       ? "bg-blue-50 text-blue-700"
                       : "text-slate-600 hover:bg-slate-100 hover:text-slate-900",
-                    collapsed && "justify-center px-2"
+                    collapsed && "lg:justify-center lg:px-2"
                   )
                 }
                 title={collapsed ? item.label : undefined}
               >
                 <Icon className="h-4 w-4 shrink-0" />
-                {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
-                {!collapsed && item.to === "/admin/customers" && pendingCustomerCount > 0 && (
-                  <span className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">
+                <span className={cn("flex-1 truncate", collapsed && "lg:hidden")}>{item.label}</span>
+                {item.to === "/admin/customers" && pendingCustomerCount > 0 && (
+                  <span
+                    className={cn(
+                      "shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800",
+                      collapsed && "lg:hidden"
+                    )}
+                  >
                     {pendingCustomerCount}
                   </span>
                 )}
@@ -184,69 +211,71 @@ export function AdminLayout() {
         </nav>
 
         <div className="border-t border-slate-200 p-3">
-          {!collapsed && (
-            <button
-              type="button"
-              onClick={() => {
-                if (userProfile?.role === "admin") {
-                  setMobileOpen(false);
-                  navigate("/admin/settings?tab=security");
-                }
-              }}
-              className={cn(
-                "mb-2 w-full rounded-md bg-slate-50 px-3 py-2 text-left transition-colors",
-                userProfile?.role === "admin" && "hover:bg-blue-50/70"
-              )}
-              title={userProfile?.role === "admin" ? "Manage admin username, password & 4-digit PIN" : undefined}
-            >
-              <p className="truncate text-xs font-semibold text-slate-800">{userProfile?.full_name}</p>
-              <p className="truncate text-[11px] tracking-wide text-slate-500">
-                {userProfile?.username ? <span className="font-mono text-slate-600">@{userProfile.username}</span> : null}
-                {userProfile?.username ? " • " : ""}
-                <span className="uppercase">{userProfile?.role}</span>
+          <button
+            type="button"
+            onClick={() => {
+              if (userProfile?.role === "admin") {
+                setMobileOpen(false);
+                navigate("/admin/settings?tab=security");
+              }
+            }}
+            className={cn(
+              "mb-2 w-full rounded-md bg-slate-50 px-3 py-2 text-left transition-colors",
+              userProfile?.role === "admin" && "hover:bg-blue-50/70",
+              collapsed && "lg:hidden"
+            )}
+            title={userProfile?.role === "admin" ? "Manage admin username, password & 4-digit PIN" : undefined}
+          >
+            <p className="truncate text-xs font-semibold text-slate-800">{userProfile?.full_name}</p>
+            <p className="truncate text-[11px] tracking-wide text-slate-500">
+              {userProfile?.username ? <span className="font-mono text-slate-600">@{userProfile.username}</span> : null}
+              {userProfile?.username ? " • " : ""}
+              <span className="uppercase">{userProfile?.role}</span>
+            </p>
+            {userProfile?.role === "admin" && (
+              <p className="mt-1 flex items-center gap-1 text-[11px] font-medium text-blue-700">
+                <KeyRound className="h-3 w-3 shrink-0" />
+                <span>Credentials &amp; 4-digit PIN</span>
               </p>
-              {userProfile?.role === "admin" && (
-                <p className="mt-1 flex items-center gap-1 text-[11px] font-medium text-blue-700">
-                  <KeyRound className="h-3 w-3 shrink-0" />
-                  <span>Credentials &amp; 4-digit PIN</span>
-                </p>
-              )}
-            </button>
-          )}
+            )}
+          </button>
           <Button
             variant="ghost"
             size="sm"
             onClick={handleSignOut}
-            className={cn("w-full justify-start text-slate-600 hover:text-red-700", collapsed && "justify-center px-0")}
+            className={cn("w-full justify-start text-slate-600 hover:text-red-700", collapsed && "lg:justify-center lg:px-0")}
           >
             <LogOut className="h-4 w-4 shrink-0" />
-            {!collapsed && <span>Sign Out</span>}
+            <span className={cn(collapsed && "lg:hidden")}>Sign Out</span>
           </Button>
         </div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-slate-200 bg-white px-4 lg:px-6">
-          <div className="flex items-center gap-3">
+        <header className="sticky top-0 z-30 flex h-16 items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 sm:px-4 lg:px-6">
+          <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
             <button
               type="button"
               onClick={() => setMobileOpen(true)}
-              className="rounded-md p-2 text-slate-600 hover:bg-slate-100 lg:hidden"
+              className="shrink-0 rounded-md p-2 text-slate-600 hover:bg-slate-100 lg:hidden"
+              aria-label="Open navigation menu"
             >
               <Menu className="h-5 w-5" />
             </button>
-            <span className="text-xs font-medium text-slate-500">
-              Agency Management Portal &bull; Centralized Source of Truth
+            <span className="truncate text-xs font-medium text-slate-500">
+              Agency Management Portal
+              <span className="hidden sm:inline"> &bull; Centralized Source of Truth</span>
             </span>
           </div>
 
-          <div className="relative flex items-center gap-3">
+          <div ref={notifContainerRef} className="relative flex shrink-0 items-center gap-3">
             <button
               type="button"
               onClick={() => setNotifOpen((o) => !o)}
               className="relative rounded-md border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-50"
               title="Notifications"
               aria-label="Notifications"
+              aria-expanded={notifOpen}
             >
               <Bell className="h-4 w-4" />
               {unreadCount > 0 && (
@@ -257,7 +286,7 @@ export function AdminLayout() {
             </button>
 
             {notifOpen && (
-              <div className="absolute right-0 top-12 z-50 w-80 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
+              <div className="fixed inset-x-3 top-[4.25rem] z-50 rounded-lg border border-slate-200 bg-white p-3 shadow-lg sm:inset-x-auto sm:absolute sm:right-0 sm:top-12 sm:w-80">
                 <div className="mb-2 flex items-center justify-between border-b border-slate-100 pb-2">
                   <span className="text-xs font-semibold uppercase tracking-wider text-slate-600">Notifications</span>
                   {unreadCount > 0 && (
@@ -303,7 +332,7 @@ export function AdminLayout() {
           </div>
         </header>
 
-        <main className="flex-1 p-4 lg:p-6">
+        <main className="min-w-0 flex-1 p-3 sm:p-4 lg:p-6">
           <Outlet />
         </main>
       </div>

@@ -15,7 +15,14 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { uploadStorageFile } from "@/lib/storage";
+import {
+  RASTER_IMAGE_ACCEPT,
+  extractStoragePathFromPublicUrl,
+  removeStorageObjectsByPublicUrls,
+  uploadStorageFile,
+  validateStorageUploadFile,
+} from "@/lib/storage";
+import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -24,19 +31,65 @@ import { useToast } from "@/components/ui/toast";
 export interface ProductPhotoDraft {
   image_url: string;
   is_primary: boolean;
+  pendingFile?: File;
+}
+
+export async function finalizeProductPhotoDrafts(
+  drafts: ProductPhotoDraft[],
+  storageFolder: string
+): Promise<{ image_url: string; is_primary: boolean }[]> {
+  const results: { image_url: string; is_primary: boolean }[] = [];
+  for (const draft of drafts) {
+    if (draft.pendingFile) {
+      const { url } = await uploadStorageFile("product-images", storageFolder, draft.pendingFile);
+      results.push({ image_url: url, is_primary: draft.is_primary });
+    } else {
+      results.push({ image_url: draft.image_url, is_primary: draft.is_primary });
+    }
+  }
+  return results;
+}
+
+export async function cleanupUnusedProductStoragePhotos(
+  previousUrls: string[],
+  nextUrls: string[]
+): Promise<void> {
+  const nextSet = new Set(nextUrls);
+  const removedCandidates = Array.from(
+    new Set(
+      previousUrls.filter(
+        (u) => !nextSet.has(u) && extractStoragePathFromPublicUrl("product-images", u) !== null
+      )
+    )
+  );
+  if (removedCandidates.length === 0) return;
+
+  try {
+    const { data } = await supabase
+      .from("product_images")
+      .select("image_url")
+      .in("image_url", removedCandidates);
+    const stillReferenced = new Set((data ?? []).map((row) => row.image_url));
+    const orphanedUrls = removedCandidates.filter((u) => !stillReferenced.has(u));
+    if (orphanedUrls.length > 0) {
+      await removeStorageObjectsByPublicUrls("product-images", orphanedUrls);
+    }
+  } catch {
+    // Non-fatal cleanup
+  }
 }
 
 interface ProductPhotoEditorProps {
   photos: ProductPhotoDraft[];
   onChange: (next: ProductPhotoDraft[]) => void;
-  storageFolder?: string;
+  disabled?: boolean;
   compact?: boolean;
 }
 
 export function ProductPhotoEditor({
   photos,
   onChange,
-  storageFolder = "catalog",
+  disabled = false,
   compact = false,
 }: ProductPhotoEditorProps) {
   const { toast } = useToast();
@@ -49,8 +102,9 @@ export function ProductPhotoEditor({
   const cameraRequestIdRef = useRef(0);
   const mountedRef = useRef(true);
   const capturedPreviewUrlRef = useRef<string | null>(null);
+  const stagedBlobUrlsRef = useRef<Set<string>>(new Set());
 
-  const [uploading, setUploading] = useState(false);
+  const [staging, setStaging] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [urlInput, setUrlInput] = useState("");
   const [showUrlInput, setShowUrlInput] = useState(false);
@@ -110,6 +164,10 @@ export function ProductPhotoEditor({
         URL.revokeObjectURL(capturedPreviewUrlRef.current);
         capturedPreviewUrlRef.current = null;
       }
+      stagedBlobUrlsRef.current.forEach((blobUrl) => {
+        URL.revokeObjectURL(blobUrl);
+      });
+      stagedBlobUrlsRef.current.clear();
     };
   }, []);
 
@@ -287,57 +345,56 @@ export function ProductPhotoEditor({
     setCapturedShot(file, previewUrl);
   };
 
-  const handleUseCapturedPhoto = async (keepCameraOpen: boolean) => {
-    if (!capturedFile) return;
-    const ok = await processFiles([capturedFile]);
-    if (!ok) return;
-    setCapturedShot(null, null);
-    if (!keepCameraOpen) {
-      closeCamera();
-    }
-  };
-
-  const processFiles = async (fileList: FileList | File[]): Promise<boolean> => {
+  const processFiles = (fileList: FileList | File[]): boolean => {
     const candidates = Array.from(fileList);
     if (candidates.length === 0) return false;
 
-    const imageFiles = candidates.filter(
-      (f) => f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|avif|svg)$/i.test(f.name)
-    );
-    if (imageFiles.length === 0) {
-      toast({
-        title: "Unsupported file type",
-        description: "Please choose PNG, JPG, WEBP, GIF, or AVIF image files.",
-        type: "error",
-      });
-      return false;
-    }
-
-    setUploading(true);
+    setStaging(true);
     try {
-      const uploaded: ProductPhotoDraft[] = [];
-      for (const file of imageFiles) {
-        const { url } = await uploadStorageFile("product-images", storageFolder, file);
-        uploaded.push({
-          image_url: url,
-          is_primary: photos.length === 0 && uploaded.length === 0,
+      const staged: ProductPhotoDraft[] = [];
+      let rejectedReason: string | null = null;
+
+      for (const file of candidates) {
+        try {
+          validateStorageUploadFile("product-images", file);
+          const previewUrl = URL.createObjectURL(file);
+          stagedBlobUrlsRef.current.add(previewUrl);
+          staged.push({
+            image_url: previewUrl,
+            is_primary: photos.length === 0 && staged.length === 0,
+            pendingFile: file,
+          });
+        } catch (err) {
+          rejectedReason = err instanceof Error ? err.message : "Unsupported file";
+        }
+      }
+
+      if (staged.length === 0) {
+        toast({
+          title: "Unsupported image file",
+          description: rejectedReason || "Please choose PNG, JPG, WEBP, GIF, or AVIF image files.",
+          type: "error",
+        });
+        return false;
+      }
+
+      onChange([...photos, ...staged]);
+      if (rejectedReason) {
+        toast({
+          title: `${staged.length} photo${staged.length > 1 ? "s" : ""} staged (some files skipped)`,
+          description: rejectedReason,
+          type: "info",
+        });
+      } else {
+        toast({
+          title: `${staged.length} photo${staged.length > 1 ? "s" : ""} staged`,
+          description: "Click Save to upload and apply.",
+          type: "success",
         });
       }
-      onChange([...photos, ...uploaded]);
-      toast({
-        title: `${uploaded.length} product photo${uploaded.length > 1 ? "s" : ""} uploaded`,
-        type: "success",
-      });
       return true;
-    } catch (err) {
-      toast({
-        title: "Photo upload failed",
-        description: err instanceof Error ? err.message : "Could not upload image",
-        type: "error",
-      });
-      return false;
     } finally {
-      setUploading(false);
+      setStaging(false);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
@@ -347,18 +404,28 @@ export function ProductPhotoEditor({
     }
   };
 
+  const handleUseCapturedPhoto = (keepCameraOpen: boolean) => {
+    if (!capturedFile) return;
+    const ok = processFiles([capturedFile]);
+    if (!ok) return;
+    setCapturedShot(null, null);
+    if (!keepCameraOpen) {
+      closeCamera();
+    }
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      void processFiles(e.target.files);
+      processFiles(e.target.files);
     }
   };
 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragOver(false);
-    if (uploading) return;
+    if (staging || disabled) return;
     if (e.dataTransfer.files?.length) {
-      void processFiles(e.dataTransfer.files);
+      processFiles(e.dataTransfer.files);
     }
   };
 
@@ -369,6 +436,14 @@ export function ProductPhotoEditor({
       toast({
         title: "Invalid image URL",
         description: "Enter a full URL starting with http:// or https://",
+        type: "error",
+      });
+      return;
+    }
+    if (/\.svg(\?|#|$)/i.test(trimmed)) {
+      toast({
+        title: "SVG URLs are blocked",
+        description: "Please provide a direct raster image URL (PNG, JPG, WEBP, GIF, or AVIF).",
         type: "error",
       });
       return;
@@ -397,12 +472,19 @@ export function ProductPhotoEditor({
   };
 
   const removePhoto = (idx: number) => {
+    const removed = photos[idx];
+    if (removed && stagedBlobUrlsRef.current.has(removed.image_url)) {
+      URL.revokeObjectURL(removed.image_url);
+      stagedBlobUrlsRef.current.delete(removed.image_url);
+    }
     const next = photos.filter((_, i) => i !== idx);
     if (next.length > 0 && !next.some((p) => p.is_primary)) {
       next[0] = { ...next[0], is_primary: true };
     }
     onChange(next);
   };
+
+  const busy = staging || disabled;
 
   return (
     <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3.5">
@@ -423,21 +505,21 @@ export function ProductPhotoEditor({
             size="sm"
             className="h-8 gap-1.5 px-2.5 text-xs border-blue-200 text-blue-700 hover:bg-blue-50"
             onClick={handleToggleCamera}
-            disabled={uploading}
+            disabled={busy}
           >
             <Camera className="h-3.5 w-3.5" />
             <span>{cameraOpen ? "Close Camera" : "Take Photo"}</span>
           </Button>
           <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md bg-blue-700 px-3 text-xs font-medium text-white shadow-sm hover:bg-blue-800">
-            {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
-            <span>{uploading ? "Uploading..." : "Add Photo"}</span>
+            {staging ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+            <span>{staging ? "Staging..." : "Add Photo"}</span>
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept={RASTER_IMAGE_ACCEPT}
               multiple
               className="hidden"
-              disabled={uploading}
+              disabled={busy}
               onChange={handleFileChange}
             />
           </label>
@@ -446,6 +528,7 @@ export function ProductPhotoEditor({
             variant="ghost"
             size="sm"
             className="h-8 px-2 text-xs text-slate-600"
+            disabled={busy}
             onClick={() => setShowUrlInput((s) => !s)}
           >
             <Link2 className="h-3.5 w-3.5" />
@@ -454,10 +537,10 @@ export function ProductPhotoEditor({
           <input
             ref={nativeCameraInputRef}
             type="file"
-            accept="image/*"
+            accept="image/jpeg,image/png,image/webp"
             capture="environment"
             className="hidden"
-            disabled={uploading}
+            disabled={busy}
             onChange={handleFileChange}
           />
         </div>
@@ -465,7 +548,7 @@ export function ProductPhotoEditor({
 
       {cameraOpen && (
         <div className="space-y-3 rounded-lg border border-blue-200 bg-white p-3 shadow-sm">
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
               <Camera className="h-4 w-4 text-blue-700" />
               <span>{capturedPreviewUrl ? "Review Captured Photo" : "Live Camera Preview"}</span>
@@ -478,7 +561,7 @@ export function ProductPhotoEditor({
                   variant="outline"
                   className="h-7 gap-1 px-2 text-xs"
                   onClick={handleSwitchCamera}
-                  disabled={cameraStarting || uploading}
+                  disabled={cameraStarting || busy}
                 >
                   <SwitchCamera className="h-3.5 w-3.5" />
                   Switch Camera
@@ -490,7 +573,7 @@ export function ProductPhotoEditor({
                 variant="ghost"
                 className="h-7 px-2 text-xs text-slate-500"
                 onClick={closeCamera}
-                disabled={uploading}
+                disabled={busy}
               >
                 <X className="h-3.5 w-3.5" />
                 Close
@@ -560,7 +643,7 @@ export function ProductPhotoEditor({
                     variant="outline"
                     className="h-8 gap-1.5 text-xs"
                     onClick={() => setCapturedShot(null, null)}
-                    disabled={uploading}
+                    disabled={busy}
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
                     Retake
@@ -571,20 +654,20 @@ export function ProductPhotoEditor({
                       size="sm"
                       variant="outline"
                       className="h-8 gap-1.5 text-xs"
-                      onClick={() => void handleUseCapturedPhoto(true)}
-                      disabled={uploading}
+                      onClick={() => handleUseCapturedPhoto(true)}
+                      disabled={busy}
                     >
-                      {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Camera className="h-3.5 w-3.5" />}
+                      {staging ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Camera className="h-3.5 w-3.5" />}
                       Use &amp; Take Another
                     </Button>
                     <Button
                       type="button"
                       size="sm"
                       className="h-8 gap-1.5 text-xs"
-                      onClick={() => void handleUseCapturedPhoto(false)}
-                      disabled={uploading}
+                      onClick={() => handleUseCapturedPhoto(false)}
+                      disabled={busy}
                     >
-                      {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                      {staging ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
                       Use Photo
                     </Button>
                   </div>
@@ -599,7 +682,7 @@ export function ProductPhotoEditor({
                     size="sm"
                     className="h-8 gap-1.5 text-xs"
                     onClick={() => void handleCaptureFrame()}
-                    disabled={!cameraReady || cameraStarting || uploading}
+                    disabled={!cameraReady || cameraStarting || busy}
                   >
                     <Camera className="h-3.5 w-3.5" />
                     Capture Photo
@@ -612,7 +695,7 @@ export function ProductPhotoEditor({
       )}
 
       {showUrlInput && (
-        <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white p-2">
+        <div className="flex flex-col gap-2 rounded-md border border-slate-200 bg-white p-2 sm:flex-row sm:items-center">
           <Input
             type="url"
             value={urlInput}
@@ -641,12 +724,12 @@ export function ProductPhotoEditor({
           onDragLeave={() => setDragOver(false)}
           onDrop={handleDrop}
           onClick={() => {
-            if (!uploading) fileInputRef.current?.click();
+            if (!busy) fileInputRef.current?.click();
           }}
           role="button"
           tabIndex={0}
           onKeyDown={(e) => {
-            if ((e.key === "Enter" || e.key === " ") && !uploading) {
+            if ((e.key === "Enter" || e.key === " ") && !busy) {
               e.preventDefault();
               fileInputRef.current?.click();
             }
@@ -659,10 +742,10 @@ export function ProductPhotoEditor({
               : "border-slate-300 hover:border-blue-400 hover:bg-slate-50/80"
           }`}
         >
-          {uploading ? (
+          {staging ? (
             <div className="flex items-center gap-2 text-xs font-medium text-blue-700">
               <Loader2 className="h-4 w-4 animate-spin" />
-              Uploading product photo(s)...
+              Preparing product photo(s)...
             </div>
           ) : (
             <p className="text-xs text-slate-600">
@@ -673,7 +756,7 @@ export function ProductPhotoEditor({
       )}
 
       {photos.length > 0 && (
-        <div className={`grid gap-3 ${compact ? "grid-cols-3 sm:grid-cols-5" : "grid-cols-2 sm:grid-cols-4"}`}>
+        <div className={`grid gap-3 ${compact ? "grid-cols-2 sm:grid-cols-5" : "grid-cols-2 sm:grid-cols-4"}`}>
           {photos.map((img, i) => (
             <div
               key={`${img.image_url}-${i}`}
@@ -686,6 +769,11 @@ export function ProductPhotoEditor({
                 {img.is_primary && (
                   <span className="absolute left-1 top-1 rounded bg-blue-700/95 px-1.5 py-0.5 text-[10px] font-semibold text-white">
                     Cover
+                  </span>
+                )}
+                {img.pendingFile && (
+                  <span className="absolute bottom-1 left-1 rounded bg-amber-600/95 px-1.5 py-0.5 text-[9px] font-semibold text-white">
+                    Pending save
                   </span>
                 )}
               </div>

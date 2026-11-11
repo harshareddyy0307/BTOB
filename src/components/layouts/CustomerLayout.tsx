@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -40,6 +40,30 @@ export function CustomerLayout() {
   const [searchTerm, setSearchTerm] = useState("");
   const [mobileMenu, setMobileMenu] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const notifContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!notifOpen && !mobileMenu) return;
+    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
+      if (notifOpen && notifContainerRef.current && !notifContainerRef.current.contains(e.target as Node)) {
+        setNotifOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setNotifOpen(false);
+        setMobileMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [notifOpen, mobileMenu]);
 
   const { data: cartCount = 0 } = useQuery({
     queryKey: ["customer-cart-count", customerProfile?.id],
@@ -105,16 +129,18 @@ export function CustomerLayout() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-white">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6">
-          <div className="flex items-center gap-3">
+        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-2 px-3 sm:gap-4 sm:px-6">
+          <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
             <button
               type="button"
               onClick={() => setMobileMenu((v) => !v)}
-              className="rounded-md p-2 text-slate-600 hover:bg-slate-100 lg:hidden"
+              className="shrink-0 rounded-md p-2 text-slate-600 hover:bg-slate-100 lg:hidden"
+              aria-label={mobileMenu ? "Close navigation menu" : "Open navigation menu"}
+              aria-expanded={mobileMenu}
             >
               {mobileMenu ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
             </button>
-            <NavLink to="/customer/home" className="flex items-center gap-2.5">
+            <NavLink to="/customer/home" className="flex min-w-0 items-center gap-2 sm:gap-2.5">
               {branding.logo_url && (
                 <img
                   src={branding.logo_url}
@@ -122,9 +148,13 @@ export function CustomerLayout() {
                   className="h-8 w-8 shrink-0 rounded border border-slate-200 bg-white object-contain p-0.5"
                 />
               )}
-              <span className="flex flex-col">
-                <span className="text-base font-bold tracking-tight text-slate-900">{branding.agency_name}</span>
-                <span className="text-[11px] font-medium text-slate-500">B2B Wholesale Ordering Portal</span>
+              <span className="flex min-w-0 flex-col">
+                <span className="truncate text-sm font-bold tracking-tight text-slate-900 sm:text-base">
+                  {branding.agency_name}
+                </span>
+                <span className="hidden truncate text-[11px] font-medium text-slate-500 sm:block">
+                  B2B Wholesale Ordering Portal
+                </span>
               </span>
             </NavLink>
           </div>
@@ -141,12 +171,14 @@ export function CustomerLayout() {
             </div>
           </form>
 
-          <div className="relative flex items-center gap-3">
+          <div ref={notifContainerRef} className="relative flex shrink-0 items-center gap-1.5 sm:gap-3">
             <button
               type="button"
               onClick={() => setNotifOpen((o) => !o)}
               className="relative rounded-md border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-50"
               title="Notifications"
+              aria-label="Notifications"
+              aria-expanded={notifOpen}
             >
               <Bell className="h-4 w-4" />
               {unreadCount > 0 && (
@@ -157,7 +189,7 @@ export function CustomerLayout() {
             </button>
 
             {notifOpen && (
-              <div className="absolute right-0 top-12 z-50 w-80 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
+              <div className="fixed inset-x-3 top-[4.25rem] z-50 rounded-lg border border-slate-200 bg-white p-3 shadow-lg sm:inset-x-auto sm:absolute sm:right-0 sm:top-12 sm:w-80">
                 <div className="mb-2 flex items-center justify-between border-b border-slate-100 pb-2">
                   <span className="text-xs font-semibold uppercase tracking-wider text-slate-600">Updates</span>
                   {unreadCount > 0 && (
@@ -191,7 +223,7 @@ export function CustomerLayout() {
 
             <NavLink
               to="/customer/cart"
-              className="relative inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              className="relative inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 sm:gap-2 sm:px-3"
             >
               <ShoppingCart className="h-4 w-4 text-primary" />
               <span className="hidden sm:inline">Cart</span>
@@ -210,18 +242,55 @@ export function CustomerLayout() {
             </Button>
           </div>
         </div>
+
+        <form onSubmit={handleSearchSubmit} className="border-t border-slate-100 px-3 py-2 sm:px-4 md:hidden">
+          <div className="relative w-full">
+            <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+            <Input
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Search products by name or SKU..."
+              aria-label="Search products"
+              className="h-9 pl-9 text-sm"
+            />
+          </div>
+        </form>
       </header>
 
-      <div className="mx-auto flex max-w-7xl gap-6 px-4 py-6 sm:px-6">
+      {mobileMenu && (
+        <div
+          className="fixed inset-0 z-40 bg-slate-900/40 lg:hidden"
+          onClick={() => setMobileMenu(false)}
+        />
+      )}
+
+      <div className="mx-auto flex max-w-7xl gap-6 px-3 py-4 sm:px-6 sm:py-6">
         <aside
           className={cn(
-            "w-60 shrink-0 lg:block",
+            "w-64 shrink-0 lg:block lg:w-60",
             mobileMenu
-              ? "fixed inset-y-16 left-0 z-30 border-r border-slate-200 bg-white p-4 shadow-lg"
+              ? "fixed inset-y-0 left-0 z-50 flex flex-col overflow-y-auto border-r border-slate-200 bg-white p-4 shadow-xl"
               : "hidden"
           )}
         >
-          <nav className="sticky top-22 space-y-1 rounded-lg border border-slate-200 bg-white p-2.5 shadow-sm">
+          <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-2.5 lg:hidden">
+            <span className="truncate text-sm font-bold text-slate-900">{branding.agency_name}</span>
+            <button
+              type="button"
+              onClick={() => setMobileMenu(false)}
+              className="rounded-md p-1 text-slate-500 hover:bg-slate-100"
+              aria-label="Close navigation menu"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          {customerProfile && (
+            <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 lg:hidden">
+              <p className="truncate text-xs font-semibold text-slate-900">{customerProfile.business_name}</p>
+              <p className="truncate text-[11px] text-slate-500">{customerProfile.owner_name}</p>
+            </div>
+          )}
+          <nav className="flex-1 space-y-1 bg-white lg:sticky lg:top-20 lg:rounded-lg lg:border lg:border-slate-200 lg:p-2.5 lg:shadow-sm">
             {CUSTOMER_NAV.map((item) => {
               const Icon = item.icon;
               return (
@@ -249,6 +318,20 @@ export function CustomerLayout() {
               );
             })}
           </nav>
+          <div className="mt-4 border-t border-slate-100 pt-3 lg:hidden">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setMobileMenu(false);
+                handleSignOut();
+              }}
+              className="w-full justify-start text-slate-600 hover:text-red-700"
+            >
+              <LogOut className="h-4 w-4 shrink-0" />
+              <span>Sign Out</span>
+            </Button>
+          </div>
         </aside>
 
         <main className="min-w-0 flex-1">

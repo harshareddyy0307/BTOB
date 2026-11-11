@@ -435,13 +435,13 @@ export function AdminCredentialsSecurityTab() {
                 </div>
               </div>
 
-              <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-4">
+              <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-3 sm:p-4">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                   <div className="space-y-1.5">
                     <Label htmlFor="admin-auth-pin" className="text-blue-950">
                       4-Digit Security PIN Verification *
                     </Label>
-                    <div className="relative w-44">
+                    <div className="relative w-full sm:w-44">
                       <Input
                         id="admin-auth-pin"
                         type={showAuthPin ? "text" : "password"}
@@ -494,7 +494,7 @@ export function AdminCredentialsSecurityTab() {
         {/* Set or Reset 4-Digit Security PIN */}
         <Card className="lg:col-span-2">
           <CardHeader>
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Lock className="h-4 w-4 text-blue-700" />
                 4-Digit Security PIN

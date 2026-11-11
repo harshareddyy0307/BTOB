@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { Plus, Building2, Eye, Pencil, Power, Loader2, CheckCircle2, XCircle, Clock } from "lucide-react";
-import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
+import { Plus, Building2, Eye, Pencil, Power, Loader2, CheckCircle2, XCircle, Clock, FileDown } from "lucide-react";
+import { exportAllCustomersPdf } from "@/lib/adminPdfExports";
+import { fetchAllRows, invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
 import { formatDate } from "@/lib/utils";
 import type { CustomerProfile } from "@/types/database";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ export function CustomersPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<CustomerProfile | null>(null);
   const [saving, setSaving] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
   const [togglingIds, setTogglingIds] = useState<Record<string, boolean>>({});
 
   const [businessName, setBusinessName] = useState("");
@@ -62,12 +64,14 @@ export function CustomersPage() {
   const { data: customers = [], isLoading } = useQuery({
     queryKey: ["admin-customers"],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("customers")
-        .select("*")
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as CustomerProfile[];
+      return await fetchAllRows<CustomerProfile>((from, to) =>
+        supabase
+          .from("customers")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to)
+      );
     },
   });
 
@@ -260,19 +264,46 @@ export function CustomersPage() {
     );
   });
 
+  const handleDownloadAllCustomersPdf = async () => {
+    if (exportingPdf) return;
+    setExportingPdf(true);
+    try {
+      const res = await exportAllCustomersPdf();
+      toast({
+        title: "Customers PDF downloaded",
+        description: `Exported ${res.customerCount} customer(s), ${res.addressCount} saved address(es), and ${res.customPriceCount} custom price rule(s).`,
+        type: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Could not export Customers PDF",
+        description: err instanceof Error ? err.message : "Error",
+        type: "error",
+      });
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Customer Management</h1>
+          <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">Customer Management</h1>
           <p className="text-sm text-slate-500">
             Manage registered local businesses, portal access approvals, outstanding dues, and custom pricing.
           </p>
         </div>
-        <Button onClick={openCreate}>
-          <Plus className="h-4 w-4" />
-          Add Customer Business
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" onClick={handleDownloadAllCustomersPdf} disabled={exportingPdf}>
+            {exportingPdf ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+            Download All Customers PDF
+          </Button>
+          <Button onClick={openCreate}>
+            <Plus className="h-4 w-4" />
+            Add Customer Business
+          </Button>
+        </div>
       </div>
 
       {pendingCustomers.length > 0 && statusFilter !== "active" && statusFilter !== "inactive" && statusFilter !== "suspended" && (
@@ -349,15 +380,15 @@ export function CustomersPage() {
             <Building2 className="h-4 w-4 text-blue-700" />
             Registered Businesses ({filtered.length})
           </CardTitle>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search business, owner, GST..."
-              className="sm:w-64"
+              className="w-full sm:w-64"
             />
             <Select value={statusFilter} onValueChange={handleStatusFilterChange}>
-              <SelectTrigger className="w-40">
+              <SelectTrigger className="w-full sm:w-40">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -371,115 +402,203 @@ export function CustomersPage() {
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Business</TableHead>
-                <TableHead>Owner &amp; Contact</TableHead>
-                <TableHead>Location</TableHead>
-                <TableHead>GSTIN</TableHead>
-                <TableHead>Registered</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {isLoading ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="py-8 text-center text-slate-500">
-                    Loading customers...
-                  </TableCell>
-                </TableRow>
-              ) : filtered.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="py-8 text-center text-slate-500">
-                    No registered businesses found.
-                  </TableCell>
-                </TableRow>
-              ) : (
-                filtered.map((c) => (
-                  <TableRow key={c.id}>
-                    <TableCell>
-                      <Link to={`/admin/customers/${c.id}`} className="font-semibold text-slate-900 hover:underline">
+          <div className="divide-y divide-slate-100 md:hidden">
+            {isLoading ? (
+              <div className="py-8 text-center text-sm text-slate-500">Loading customers...</div>
+            ) : filtered.length === 0 ? (
+              <div className="py-8 text-center text-sm text-slate-500">No registered businesses found.</div>
+            ) : (
+              filtered.map((c) => (
+                <div key={c.id} className="space-y-2.5 p-4 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <Link to={`/admin/customers/${c.id}`} className="text-sm font-semibold text-slate-900 hover:underline">
                         {c.business_name}
                       </Link>
-                      <p className="text-xs text-slate-500">{c.business_category || "Local Business"}</p>
-                    </TableCell>
-                    <TableCell>
-                      <p className="text-sm font-medium text-slate-800">{c.owner_name}</p>
-                      <p className="text-xs text-slate-500">
-                        {c.phone} &bull; {c.email}
-                      </p>
-                    </TableCell>
-                    <TableCell className="text-xs text-slate-600">
+                      <p className="text-slate-500">{c.business_category || "Local Business"}</p>
+                    </div>
+                    <StatusBadge status={c.status} />
+                  </div>
+                  <div className="space-y-0.5 text-slate-600">
+                    <p className="font-medium text-slate-800">{c.owner_name}</p>
+                    <p className="break-all">
+                      {c.phone} &bull; {c.email}
+                    </p>
+                    <p className="text-slate-500">
                       {[c.city, c.state].filter(Boolean).join(", ")}
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-slate-600">{c.gst_number || "—"}</TableCell>
-                    <TableCell className="text-xs text-slate-500">{formatDate(c.registered_at)}</TableCell>
-                    <TableCell>
-                      <StatusBadge status={c.status} />
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="inline-flex items-center gap-1">
-                        {c.status === "pending" && (
-                          <Button
-                            size="sm"
-                            onClick={() => void updateCustomerAccess(c, true)}
-                            disabled={Boolean(togglingIds[c.id])}
-                            className="h-8 bg-emerald-600 px-2.5 text-xs text-white hover:bg-emerald-700"
-                          >
-                            {togglingIds[c.id] ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <CheckCircle2 className="h-3.5 w-3.5" />
-                            )}
-                            Grant Access
-                          </Button>
-                        )}
-                        <Link
-                          to={`/admin/customers/${c.id}`}
-                          className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                        >
-                          <Eye className="h-3.5 w-3.5" />
-                          Profile
-                        </Link>
-                        <Button variant="ghost" size="icon" onClick={() => openEdit(c)} title="Edit">
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        {c.status === "pending" ? (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => void updateCustomerAccess(c, false)}
-                            disabled={Boolean(togglingIds[c.id])}
-                            aria-label={`Decline ${c.business_name}`}
-                            title="Decline registration"
-                          >
-                            <XCircle className="h-4 w-4 text-red-600" />
-                          </Button>
+                      {c.gst_number ? ` • GSTIN: ${c.gst_number}` : ""} &bull; Reg: {formatDate(c.registered_at)}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-end gap-1.5 border-t border-slate-100 pt-2">
+                    {c.status === "pending" && (
+                      <Button
+                        size="sm"
+                        onClick={() => void updateCustomerAccess(c, true)}
+                        disabled={Boolean(togglingIds[c.id])}
+                        className="h-8 bg-emerald-600 px-2.5 text-xs text-white hover:bg-emerald-700"
+                      >
+                        {togglingIds[c.id] ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         ) : (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => toggleStatus(c)}
-                            disabled={Boolean(togglingIds[c.id])}
-                            aria-label={c.status === "active" ? `Deactivate ${c.business_name}` : `Activate ${c.business_name}`}
-                            title={c.status === "active" ? "Deactivate customer" : "Activate customer"}
-                          >
-                            {togglingIds[c.id] ? (
-                              <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
-                            ) : (
-                              <Power className={c.status === "active" ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-emerald-600"} />
-                            )}
-                          </Button>
+                          <CheckCircle2 className="h-3.5 w-3.5" />
                         )}
-                      </div>
+                        Grant Access
+                      </Button>
+                    )}
+                    <Link
+                      to={`/admin/customers/${c.id}`}
+                      className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                      Profile
+                    </Link>
+                    <Button variant="ghost" size="icon" onClick={() => openEdit(c)} title="Edit">
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                    {c.status === "pending" ? (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => void updateCustomerAccess(c, false)}
+                        disabled={Boolean(togglingIds[c.id])}
+                        aria-label={`Decline ${c.business_name}`}
+                        title="Decline registration"
+                      >
+                        <XCircle className="h-4 w-4 text-red-600" />
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => toggleStatus(c)}
+                        disabled={Boolean(togglingIds[c.id])}
+                        aria-label={c.status === "active" ? `Deactivate ${c.business_name}` : `Activate ${c.business_name}`}
+                        title={c.status === "active" ? "Deactivate customer" : "Activate customer"}
+                      >
+                        {togglingIds[c.id] ? (
+                          <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
+                        ) : (
+                          <Power className={c.status === "active" ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-emerald-600"} />
+                        )}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Business</TableHead>
+                  <TableHead>Owner &amp; Contact</TableHead>
+                  <TableHead>Location</TableHead>
+                  <TableHead>GSTIN</TableHead>
+                  <TableHead>Registered</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {isLoading ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="py-8 text-center text-slate-500">
+                      Loading customers...
                     </TableCell>
                   </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
+                ) : filtered.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="py-8 text-center text-slate-500">
+                      No registered businesses found.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  filtered.map((c) => (
+                    <TableRow key={c.id}>
+                      <TableCell>
+                        <Link to={`/admin/customers/${c.id}`} className="font-semibold text-slate-900 hover:underline">
+                          {c.business_name}
+                        </Link>
+                        <p className="text-xs text-slate-500">{c.business_category || "Local Business"}</p>
+                      </TableCell>
+                      <TableCell>
+                        <p className="text-sm font-medium text-slate-800">{c.owner_name}</p>
+                        <p className="text-xs text-slate-500">
+                          {c.phone} &bull; {c.email}
+                        </p>
+                      </TableCell>
+                      <TableCell className="text-xs text-slate-600">
+                        {[c.city, c.state].filter(Boolean).join(", ")}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs text-slate-600">{c.gst_number || "—"}</TableCell>
+                      <TableCell className="text-xs text-slate-500">{formatDate(c.registered_at)}</TableCell>
+                      <TableCell>
+                        <StatusBadge status={c.status} />
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="inline-flex items-center gap-1">
+                          {c.status === "pending" && (
+                            <Button
+                              size="sm"
+                              onClick={() => void updateCustomerAccess(c, true)}
+                              disabled={Boolean(togglingIds[c.id])}
+                              className="h-8 bg-emerald-600 px-2.5 text-xs text-white hover:bg-emerald-700"
+                            >
+                              {togglingIds[c.id] ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <CheckCircle2 className="h-3.5 w-3.5" />
+                              )}
+                              Grant Access
+                            </Button>
+                          )}
+                          <Link
+                            to={`/admin/customers/${c.id}`}
+                            className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            Profile
+                          </Link>
+                          <Button variant="ghost" size="icon" onClick={() => openEdit(c)} title="Edit">
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          {c.status === "pending" ? (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => void updateCustomerAccess(c, false)}
+                              disabled={Boolean(togglingIds[c.id])}
+                              aria-label={`Decline ${c.business_name}`}
+                              title="Decline registration"
+                            >
+                              <XCircle className="h-4 w-4 text-red-600" />
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => toggleStatus(c)}
+                              disabled={Boolean(togglingIds[c.id])}
+                              aria-label={c.status === "active" ? `Deactivate ${c.business_name}` : `Activate ${c.business_name}`}
+                              title={c.status === "active" ? "Deactivate customer" : "Activate customer"}
+                            >
+                              {togglingIds[c.id] ? (
+                                <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
+                              ) : (
+                                <Power className={c.status === "active" ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-emerald-600"} />
+                              )}
+                            </Button>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 

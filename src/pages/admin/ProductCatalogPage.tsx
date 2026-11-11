@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Plus, Package, Pencil, Copy, Trash2, Globe, GlobeLock, Camera, Loader2, RefreshCw } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { fetchAllRows, supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   bulkPublishProducts,
@@ -10,6 +10,7 @@ import {
   bulkUpdatePublishedPrices,
   invalidateCatalogQueries,
 } from "@/lib/productPublishing";
+import { getCategoryAndDescendantIds } from "@/lib/categories";
 import { isPublishedWithPendingPrice } from "@/lib/pricing";
 import { formatCurrency, formatQty } from "@/lib/utils";
 import type { AdminProduct, Category, Manufacturer } from "@/types/database";
@@ -24,7 +25,8 @@ import { ProductPhotoDialog, sortProductImages } from "@/components/admin/Produc
 import { useToast } from "@/components/ui/toast";
 
 export function ProductCatalogPage() {
-  const { userProfile } = useAuth();
+  const { userProfile, branding } = useAuth();
+  const sym = branding.currency_symbol || "₹";
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -61,14 +63,16 @@ export function ProductCatalogPage() {
   const { data: products = [], isLoading } = useQuery({
     queryKey: ["admin-all-products"],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("products")
-        .select(
-          "*, manufacturer:manufacturers(id, company_name, status), category:categories(id, name, slug), product_images(*), product_prices(*), inventory(*)"
-        )
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as unknown as AdminProduct[];
+      return await fetchAllRows<AdminProduct>((from, to) =>
+        supabase
+          .from("products")
+          .select(
+            "*, manufacturer:manufacturers(id, company_name, status), category:categories(id, name, slug), product_images(*), product_prices(*), inventory(*)"
+          )
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to)
+      );
     },
   });
 
@@ -76,7 +80,7 @@ export function ProductCatalogPage() {
     try {
       if (!p.is_published) {
         if (Number(p.product_prices?.draft_selling_price ?? 0) <= 0) {
-          toast({ title: "Cannot publish product with ₹0 selling price", type: "error" });
+          toast({ title: `Cannot publish product with ${sym}0 selling price`, type: "error" });
           return;
         }
         const { error } = await supabase.rpc("publish_product_prices", {
@@ -103,8 +107,8 @@ export function ProductCatalogPage() {
       const { publishedCount, skippedZeroPriceCount } = await bulkPublishProducts(filtered, queryClient);
       if (publishedCount === 0 && skippedZeroPriceCount > 0) {
         toast({
-          title: "Cannot publish ₹0 price products",
-          description: `${skippedZeroPriceCount} unpublished product(s) have a ₹0 selling price. Set manufacturer price or margin first.`,
+          title: `Cannot publish ${sym}0 price products`,
+          description: `${skippedZeroPriceCount} unpublished product(s) have a ${sym}0 selling price. Set manufacturer price or margin first.`,
           type: "error",
         });
         return;
@@ -113,7 +117,7 @@ export function ProductCatalogPage() {
         title: `Published ${publishedCount} product(s) to Customer Catalog`,
         description:
           skippedZeroPriceCount > 0
-            ? `Skipped ${skippedZeroPriceCount} product(s) with ₹0 selling price.`
+            ? `Skipped ${skippedZeroPriceCount} product(s) with ${sym}0 selling price.`
             : undefined,
         type: "success",
       });
@@ -147,8 +151,8 @@ export function ProductCatalogPage() {
       const { updatedCount, skippedZeroPriceCount } = await bulkUpdatePublishedPrices(filtered, queryClient);
       if (updatedCount === 0 && skippedZeroPriceCount > 0) {
         toast({
-          title: "Cannot update ₹0 price products",
-          description: `${skippedZeroPriceCount} published product(s) have a ₹0 draft selling price.`,
+          title: `Cannot update ${sym}0 price products`,
+          description: `${skippedZeroPriceCount} published product(s) have a ${sym}0 draft selling price.`,
           type: "error",
         });
         return;
@@ -157,7 +161,7 @@ export function ProductCatalogPage() {
         title: `Updated live selling prices for ${updatedCount} published product(s)`,
         description:
           skippedZeroPriceCount > 0
-            ? `Skipped ${skippedZeroPriceCount} ₹0-price item(s). Draft products remain unpublished.`
+            ? `Skipped ${skippedZeroPriceCount} ${sym}0-price item(s). Draft products remain unpublished.`
             : "Customer Portal now shows the updated prices for published products.",
         type: "success",
       });
@@ -183,6 +187,11 @@ export function ProductCatalogPage() {
     void invalidateCatalogQueries(queryClient);
   };
 
+  const allowedCategoryIds = useMemo(
+    () => (categoryId === "all" ? null : new Set(getCategoryAndDescendantIds(categories, categoryId))),
+    [categories, categoryId]
+  );
+
   const filtered = products.filter((p) => {
     const q = search.toLowerCase();
     const matchesSearch =
@@ -191,10 +200,11 @@ export function ProductCatalogPage() {
       p.sku.toLowerCase().includes(q) ||
       (p.manufacturer?.company_name || "").toLowerCase().includes(q);
     if (!matchesSearch) return false;
-    if (categoryId !== "all" && p.category_id !== categoryId) return false;
+    if (allowedCategoryIds && !allowedCategoryIds.has(p.category_id)) return false;
     if (manufacturerId !== "all" && p.manufacturer_id !== manufacturerId) return false;
     if (publishedFilter === "published" && !p.is_published) return false;
     if (publishedFilter === "unpublished" && p.is_published) return false;
+    if (publishedFilter === "inactive" && p.status !== "inactive") return false;
 
     const avail = Number(p.inventory?.available_quantity ?? 0);
     const thresh = Number(p.inventory?.low_stock_threshold ?? 10);
@@ -224,7 +234,7 @@ export function ProductCatalogPage() {
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Centralized Product Catalog</h1>
+          <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">Centralized Product Catalog</h1>
           <p className="text-sm text-slate-500">
             Combined catalog across all manufacturers. Admin-only manufacturer cost and margin details are never exposed to customers.
           </p>
@@ -298,20 +308,21 @@ export function ProductCatalogPage() {
               <SelectItem value="all">All Statuses</SelectItem>
               <SelectItem value="published">Published</SelectItem>
               <SelectItem value="unpublished">Unpublished</SelectItem>
+              <SelectItem value="inactive">Inactive</SelectItem>
             </SelectContent>
           </Select>
 
           <div className="flex items-center gap-2 lg:col-span-2">
             <Input
               type="number"
-              placeholder="Min Price (₹)"
+              placeholder={`Min Price (${sym})`}
               value={minPrice}
               onChange={(e) => setMinPrice(e.target.value)}
             />
             <span className="text-slate-400">—</span>
             <Input
               type="number"
-              placeholder="Max Price (₹)"
+              placeholder={`Max Price (${sym})`}
               value={maxPrice}
               onChange={(e) => setMaxPrice(e.target.value)}
             />
@@ -341,9 +352,7 @@ export function ProductCatalogPage() {
                 ) : (
                   <RefreshCw className="h-4 w-4" />
                 )}
-                {hasActiveFilters
-                  ? `Update Published Prices (${livePriceUpdateTargets.length})`
-                  : `Update Published Prices (${livePriceUpdateTargets.length})`}
+                {`Update Published Prices (${livePriceUpdateTargets.length})`}
               </Button>
             )}
             <Button
@@ -377,7 +386,113 @@ export function ProductCatalogPage() {
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          <Table>
+          <div className="divide-y divide-slate-100 md:hidden">
+            {isLoading ? (
+              <div className="py-8 text-center text-sm text-slate-500">Loading products...</div>
+            ) : filtered.length === 0 ? (
+              <div className="py-8 text-center text-sm text-slate-500">No matching products found.</div>
+            ) : (
+              filtered.map((p) => {
+                const avail = Number(p.inventory?.available_quantity ?? 0);
+                const thresh = Number(p.inventory?.low_stock_threshold ?? 10);
+                const stockStat = avail <= 0 ? "out_of_stock" : avail <= thresh ? "low_stock" : "in_stock";
+                const sortedPhotos = sortProductImages(p.product_images);
+                const thumb = sortedPhotos[0]?.image_url;
+
+                return (
+                  <div key={p.id} className="space-y-2.5 p-4 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex min-w-0 flex-1 items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setPhotoProduct(p)}
+                          title={thumb ? "Manage product photos" : "Add product photo"}
+                          className="relative h-11 w-11 shrink-0 overflow-hidden rounded-md border bg-slate-50"
+                        >
+                          {thumb ? (
+                            <img src={thumb} alt={p.name} className="h-full w-full object-cover" />
+                          ) : (
+                            <span className="flex h-full w-full items-center justify-center text-slate-400">
+                              <Camera className="h-4 w-4" />
+                            </span>
+                          )}
+                        </button>
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-slate-900">{p.name}</p>
+                          <p className="truncate font-mono text-slate-500">
+                            {p.sku} &bull; {p.category?.name}
+                          </p>
+                          <Link
+                            to={`/admin/manufacturers/${p.manufacturer_id}`}
+                            className="truncate font-medium text-blue-700 hover:underline"
+                          >
+                            {p.manufacturer?.company_name}
+                          </Link>
+                        </div>
+                      </div>
+                      <StatusBadge status={p.status === "inactive" ? "inactive" : p.is_published ? "published" : "draft"} />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-600">
+                      <span>Orig: {formatCurrency(p.product_prices?.draft_manufacturer_price ?? 0, sym)}</span>
+                      <span>Margin: {p.product_prices?.draft_margin_percentage ?? 0}%</span>
+                      <span className="font-semibold text-blue-700">
+                        Sell: {formatCurrency(p.product_prices?.draft_selling_price ?? 0, sym)}
+                      </span>
+                      {isPublishedWithPendingPrice(p) && (
+                        <span>Live: {formatCurrency(p.product_prices?.published_selling_price ?? 0, sym)}</span>
+                      )}
+                      <span>
+                        Stock: {formatQty(avail)} {p.unit_of_measurement}
+                      </span>
+                      <StatusBadge status={stockStat} />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-end gap-1 border-t border-slate-100 pt-2">
+                      <Button variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => setPhotoProduct(p)}>
+                        <Camera className="h-3.5 w-3.5 text-blue-700" />
+                        <span>{sortedPhotos.length > 0 ? `Photos (${sortedPhotos.length})` : "Add Photo"}</span>
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => togglePublish(p)}
+                        title={p.is_published ? "Unpublish" : "Publish"}
+                      >
+                        {p.is_published ? <GlobeLock className="h-4 w-4 text-amber-600" /> : <Globe className="h-4 w-4 text-emerald-600" />}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => {
+                          setEditing(p);
+                          setDuplicateMode(false);
+                          setDialogOpen(true);
+                        }}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => {
+                          setEditing(p);
+                          setDuplicateMode(true);
+                          setDialogOpen(true);
+                        }}
+                      >
+                        <Copy className="h-4 w-4" />
+                      </Button>
+                      <Button variant="ghost" size="icon" className="text-red-600" onClick={() => handleDelete(p)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Product</TableHead>
@@ -454,15 +569,15 @@ export function ProductCatalogPage() {
                         </Link>
                       </TableCell>
                       <TableCell className="text-sm font-medium text-slate-900">
-                        {formatCurrency(p.product_prices?.draft_manufacturer_price ?? 0)}
+                        {formatCurrency(p.product_prices?.draft_manufacturer_price ?? 0, sym)}
                       </TableCell>
                       <TableCell className="text-xs text-slate-600">
                         {p.product_prices?.draft_margin_percentage ?? 0}% (
-                        {formatCurrency(p.product_prices?.draft_margin_amount ?? 0)})
+                        {formatCurrency(p.product_prices?.draft_margin_amount ?? 0, sym)})
                       </TableCell>
                       <TableCell className="font-semibold text-blue-700">
                         <div>
-                          <span>{formatCurrency(p.product_prices?.draft_selling_price ?? 0)}</span>
+                          <span>{formatCurrency(p.product_prices?.draft_selling_price ?? 0, sym)}</span>
                           {p.product_prices?.approval_status === "pending_review" && (
                             <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
                               Draft
@@ -471,7 +586,7 @@ export function ProductCatalogPage() {
                         </div>
                         {isPublishedWithPendingPrice(p) && (
                           <p className="text-[11px] font-normal text-slate-500">
-                            Live: {formatCurrency(p.product_prices?.published_selling_price ?? 0)}
+                            Live: {formatCurrency(p.product_prices?.published_selling_price ?? 0, sym)}
                           </p>
                         )}
                       </TableCell>
@@ -482,7 +597,14 @@ export function ProductCatalogPage() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        <StatusBadge status={p.is_published ? "published" : "draft"} />
+                        <div className="flex flex-col gap-1">
+                          <StatusBadge
+                            status={p.status === "inactive" ? "inactive" : p.is_published ? "published" : "draft"}
+                          />
+                          {p.status === "inactive" && p.is_published && (
+                            <span className="text-[10px] text-slate-500">Hidden while inactive</span>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="inline-flex items-center gap-1">
@@ -546,6 +668,7 @@ export function ProductCatalogPage() {
               )}
             </TableBody>
           </Table>
+          </div>
         </CardContent>
       </Card>
 

@@ -11,7 +11,7 @@ const MAX_PIN_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 const USERNAME_REGEX = /^[a-z0-9._-]{3,32}$/;
 const PIN_REGEX = /^\d{4}$/;
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const EMAIL_REGEX = /^[^\s@%]+@[^\s@%]+\.[^\s@%]{2,}$/;
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -69,6 +69,10 @@ function timingSafeEqualHex(a: string, b: string): boolean {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
+  }
+
+  if (req.method !== "POST") {
+    return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
   try {
@@ -421,7 +425,7 @@ Deno.serve(async (req: Request) => {
         const { data: dupUser } = await adminClient
           .from("users")
           .select("id")
-          .ilike("username", nextUsername)
+          .eq("username", nextUsername)
           .neq("id", caller.id)
           .maybeSingle();
 
@@ -434,7 +438,7 @@ Deno.serve(async (req: Request) => {
         const { data: dupEmail } = await adminClient
           .from("users")
           .select("id")
-          .ilike("email", nextEmail)
+          .eq("email", nextEmail)
           .neq("id", caller.id)
           .maybeSingle();
 

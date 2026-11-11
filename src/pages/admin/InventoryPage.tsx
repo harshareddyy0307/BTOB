@@ -2,7 +2,8 @@ import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Boxes, AlertTriangle, PackageX, ArrowUpDown, History, Loader2, Search } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { supabase, fetchAllRows } from "@/lib/supabase";
+import { getCategoryAndDescendantIds } from "@/lib/categories";
 import { formatDateTime, formatQty } from "@/lib/utils";
 import type { AdminProduct, Category, InventoryMovementRecord, Manufacturer } from "@/types/database";
 import { Button } from "@/components/ui/button";
@@ -35,16 +36,16 @@ export function InventoryPage() {
 
   const { data: products = [], isLoading } = useQuery({
     queryKey: ["admin-inventory"],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("products")
-        .select(
-          "*, manufacturer:manufacturers(id, company_name, status), category:categories(id, name, slug), inventory(*)"
-        )
-        .order("name");
-      if (error) throw error;
-      return (data ?? []) as unknown as AdminProduct[];
-    },
+    queryFn: async () =>
+      fetchAllRows<AdminProduct>((from, to) =>
+        supabase
+          .from("products")
+          .select(
+            "*, manufacturer:manufacturers(id, company_name, status), category:categories(id, name, slug), inventory(*)"
+          )
+          .order("name")
+          .range(from, to)
+      ),
   });
 
   const { data: movements = [], isLoading: loadingMovements } = useQuery({
@@ -88,34 +89,33 @@ export function InventoryPage() {
     e.preventDefault();
     if (!adjustProduct) return;
 
-    const delta = Number(deltaStr) || 0;
-    const threshold = Math.max(0, Number(thresholdStr) || 0);
+    const delta = Number(deltaStr);
+    const threshold = Number(thresholdStr);
     const oldThreshold = Number(adjustProduct.inventory?.low_stock_threshold ?? 10);
 
-    if (delta === 0 && threshold === oldThreshold) {
+    if (!Number.isFinite(delta) || !Number.isFinite(threshold) || threshold < 0) {
+      toast({ title: "Enter valid numeric stock delta and threshold (>= 0)", type: "error" });
+      return;
+    }
+
+    const roundedDelta = Math.round(delta * 100) / 100;
+    const roundedThreshold = Math.round(threshold * 100) / 100;
+
+    if (roundedDelta === 0 && roundedThreshold === oldThreshold) {
       toast({ title: "Enter a non-zero stock adjustment or update alert threshold", type: "info" });
       return;
     }
 
     setSaving(true);
     try {
-      if (delta !== 0) {
-        const { error } = await supabase.rpc("adjust_inventory_admin", {
-          p_product_id: adjustProduct.id,
-          p_quantity_delta: delta,
-          p_movement_type: delta < 0 ? "manual_adjustment" : movementType,
-          p_notes: notes.trim() || `Manual stock adjustment (${delta > 0 ? "+" : ""}${delta})`,
-        });
-        if (error) throw error;
-      }
-
-      if (threshold !== oldThreshold) {
-        const { error: thrErr } = await supabase
-          .from("inventory")
-          .update({ low_stock_threshold: threshold })
-          .eq("product_id", adjustProduct.id);
-        if (thrErr) throw thrErr;
-      }
+      const { error } = await supabase.rpc("adjust_product_stock_and_threshold_admin", {
+        p_product_id: adjustProduct.id,
+        p_quantity_delta: roundedDelta,
+        p_low_stock_threshold: roundedThreshold,
+        p_movement_type: roundedDelta < 0 ? "manual_adjustment" : movementType,
+        p_notes: notes.trim() || `Manual stock adjustment (${roundedDelta > 0 ? "+" : ""}${roundedDelta})`,
+      });
+      if (error) throw error;
 
       toast({
         title: "Inventory updated",
@@ -146,6 +146,9 @@ export function InventoryPage() {
   }).length;
   const outOfStockCount = products.filter((p) => Number(p.inventory?.available_quantity ?? 0) <= 0).length;
 
+  const allowedCategoryIds =
+    catFilter === "all" ? null : new Set(getCategoryAndDescendantIds(categories, catFilter));
+
   const filteredProducts = products.filter((p) => {
     const avail = Number(p.inventory?.available_quantity ?? 0);
     const thresh = Number(p.inventory?.low_stock_threshold ?? 10);
@@ -153,7 +156,7 @@ export function InventoryPage() {
 
     if (stockFilter !== "all" && st !== stockFilter) return false;
     if (mfgFilter !== "all" && p.manufacturer_id !== mfgFilter) return false;
-    if (catFilter !== "all" && p.category_id !== catFilter) return false;
+    if (allowedCategoryIds && (!p.category_id || !allowedCategoryIds.has(p.category_id))) return false;
 
     const q = search.toLowerCase().trim();
     if (!q) return true;
@@ -170,51 +173,51 @@ export function InventoryPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight text-slate-900">Inventory Management</h1>
+        <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">Inventory Management</h1>
         <p className="text-sm text-slate-500">
           Track available warehouse stock, customer-reserved units, sold totals, and low-stock alerts. Changes sync to Customer Portal immediately.
         </p>
       </div>
 
       {/* KPI Row */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
         <Card>
-          <CardContent className="flex items-center justify-between p-4">
-            <div>
+          <CardContent className="flex items-center justify-between gap-2 p-3.5 sm:p-4">
+            <div className="min-w-0">
               <p className="text-xs font-medium text-slate-500">Available Stock Units</p>
-              <p className="mt-1 text-2xl font-bold text-slate-900">{formatQty(totalAvailable)}</p>
+              <p className="mt-1 text-xl font-bold text-slate-900 sm:text-2xl">{formatQty(totalAvailable)}</p>
             </div>
-            <Boxes className="h-5 w-5 text-blue-700" />
+            <Boxes className="h-5 w-5 shrink-0 text-blue-700" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="flex items-center justify-between p-4">
-            <div>
+          <CardContent className="flex items-center justify-between gap-2 p-3.5 sm:p-4">
+            <div className="min-w-0">
               <p className="text-xs font-medium text-slate-500">Reserved (Open Orders)</p>
-              <p className="mt-1 text-2xl font-bold text-slate-900">{formatQty(totalReserved)}</p>
+              <p className="mt-1 text-xl font-bold text-slate-900 sm:text-2xl">{formatQty(totalReserved)}</p>
             </div>
-            <ArrowUpDown className="h-5 w-5 text-slate-400" />
+            <ArrowUpDown className="h-5 w-5 shrink-0 text-slate-400" />
           </CardContent>
         </Card>
         <button type="button" onClick={() => setStockFilter("low_stock")} className="text-left">
           <Card className="transition-colors hover:border-amber-300">
-            <CardContent className="flex items-center justify-between p-4">
-              <div>
+            <CardContent className="flex items-center justify-between gap-2 p-3.5 sm:p-4">
+              <div className="min-w-0">
                 <p className="text-xs font-medium text-amber-700">Low Stock Alerts</p>
-                <p className="mt-1 text-2xl font-bold text-amber-700">{lowStockCount}</p>
+                <p className="mt-1 text-xl font-bold text-amber-700 sm:text-2xl">{lowStockCount}</p>
               </div>
-              <AlertTriangle className="h-5 w-5 text-amber-600" />
+              <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600" />
             </CardContent>
           </Card>
         </button>
         <button type="button" onClick={() => setStockFilter("out_of_stock")} className="text-left">
           <Card className="transition-colors hover:border-red-300">
-            <CardContent className="flex items-center justify-between p-4">
-              <div>
+            <CardContent className="flex items-center justify-between gap-2 p-3.5 sm:p-4">
+              <div className="min-w-0">
                 <p className="text-xs font-medium text-red-700">Out of Stock SKUs</p>
-                <p className="mt-1 text-2xl font-bold text-red-700">{outOfStockCount}</p>
+                <p className="mt-1 text-xl font-bold text-red-700 sm:text-2xl">{outOfStockCount}</p>
               </div>
-              <PackageX className="h-5 w-5 text-red-600" />
+              <PackageX className="h-5 w-5 shrink-0 text-red-600" />
             </CardContent>
           </Card>
         </button>
@@ -283,73 +286,139 @@ export function InventoryPage() {
 
           <Card>
             <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Product / SKU</TableHead>
-                    <TableHead>Manufacturer</TableHead>
-                    <TableHead>Available</TableHead>
-                    <TableHead>Reserved</TableHead>
-                    <TableHead>Sold Total</TableHead>
-                    <TableHead>Alert At</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead className="text-right">Action</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {isLoading ? (
-                    <TableRow>
-                      <TableCell colSpan={8} className="py-10 text-center text-slate-500">
-                        Loading inventory...
-                      </TableCell>
-                    </TableRow>
-                  ) : filteredProducts.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={8} className="py-10 text-center text-slate-500">
-                        No matching inventory items.
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    filteredProducts.map((p) => {
-                      const avail = Number(p.inventory?.available_quantity ?? 0);
-                      const reserved = Number(p.inventory?.reserved_quantity ?? 0);
-                      const sold = Number(p.inventory?.sold_quantity ?? 0);
-                      const thresh = Number(p.inventory?.low_stock_threshold ?? 10);
-                      const status = avail <= 0 ? "out_of_stock" : avail <= thresh ? "low_stock" : "in_stock";
+              <div className="divide-y divide-slate-100 md:hidden">
+                {isLoading ? (
+                  <p className="py-10 text-center text-sm text-slate-500">Loading inventory...</p>
+                ) : filteredProducts.length === 0 ? (
+                  <p className="py-10 text-center text-sm text-slate-500">No matching inventory items.</p>
+                ) : (
+                  filteredProducts.map((p) => {
+                    const avail = Number(p.inventory?.available_quantity ?? 0);
+                    const reserved = Number(p.inventory?.reserved_quantity ?? 0);
+                    const sold = Number(p.inventory?.sold_quantity ?? 0);
+                    const thresh = Number(p.inventory?.low_stock_threshold ?? 10);
+                    const status = avail <= 0 ? "out_of_stock" : avail <= thresh ? "low_stock" : "in_stock";
 
-                      return (
-                        <TableRow key={p.id}>
-                          <TableCell>
-                            <p className="font-medium text-slate-900">{p.name}</p>
-                            <p className="font-mono text-xs text-slate-500">
+                    return (
+                      <div key={p.id} className="space-y-2.5 p-4 text-xs">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="font-semibold text-slate-900">{p.name}</p>
+                            <p className="font-mono text-slate-500">
                               {p.sku} &bull; {p.category?.name}
                             </p>
-                          </TableCell>
-                          <TableCell className="text-xs font-medium text-slate-700">
-                            <Link to={`/admin/manufacturers/${p.manufacturer_id}`} className="hover:underline">
-                              {p.manufacturer?.company_name}
-                            </Link>
-                          </TableCell>
-                          <TableCell className="font-semibold text-slate-900">
-                            {formatQty(avail)} {p.unit_of_measurement}
-                          </TableCell>
-                          <TableCell className="text-xs text-slate-600">{formatQty(reserved)}</TableCell>
-                          <TableCell className="text-xs text-slate-600">{formatQty(sold)}</TableCell>
-                          <TableCell className="text-xs text-slate-500">{formatQty(thresh)}</TableCell>
-                          <TableCell>
-                            <StatusBadge status={status} />
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <Button variant="outline" size="sm" onClick={() => openAdjustModal(p)}>
-                              Adjust Stock
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })
-                  )}
-                </TableBody>
-              </Table>
+                          </div>
+                          <StatusBadge status={status} />
+                        </div>
+
+                        <p className="text-slate-600">
+                          Mfg:{" "}
+                          <Link to={`/admin/manufacturers/${p.manufacturer_id}`} className="font-medium text-blue-700 hover:underline">
+                            {p.manufacturer?.company_name}
+                          </Link>
+                        </p>
+
+                        <div className="grid grid-cols-2 gap-2 rounded-md border border-slate-100 bg-slate-50 p-2.5">
+                          <div>
+                            <span className="text-slate-500">Available: </span>
+                            <strong className="text-slate-900">
+                              {formatQty(avail)} {p.unit_of_measurement}
+                            </strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Reserved: </span>
+                            <strong className="text-slate-900">{formatQty(reserved)}</strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Sold Total: </span>
+                            <strong className="text-slate-900">{formatQty(sold)}</strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Alert At: </span>
+                            <strong className="text-slate-900">{formatQty(thresh)}</strong>
+                          </div>
+                        </div>
+
+                        <div className="flex justify-end">
+                          <Button variant="outline" size="sm" onClick={() => openAdjustModal(p)}>
+                            Adjust Stock
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Product / SKU</TableHead>
+                      <TableHead>Manufacturer</TableHead>
+                      <TableHead>Available</TableHead>
+                      <TableHead>Reserved</TableHead>
+                      <TableHead>Sold Total</TableHead>
+                      <TableHead>Alert At</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {isLoading ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="py-10 text-center text-slate-500">
+                          Loading inventory...
+                        </TableCell>
+                      </TableRow>
+                    ) : filteredProducts.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="py-10 text-center text-slate-500">
+                          No matching inventory items.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      filteredProducts.map((p) => {
+                        const avail = Number(p.inventory?.available_quantity ?? 0);
+                        const reserved = Number(p.inventory?.reserved_quantity ?? 0);
+                        const sold = Number(p.inventory?.sold_quantity ?? 0);
+                        const thresh = Number(p.inventory?.low_stock_threshold ?? 10);
+                        const status = avail <= 0 ? "out_of_stock" : avail <= thresh ? "low_stock" : "in_stock";
+
+                        return (
+                          <TableRow key={p.id}>
+                            <TableCell>
+                              <p className="font-medium text-slate-900">{p.name}</p>
+                              <p className="font-mono text-xs text-slate-500">
+                                {p.sku} &bull; {p.category?.name}
+                              </p>
+                            </TableCell>
+                            <TableCell className="text-xs font-medium text-slate-700">
+                              <Link to={`/admin/manufacturers/${p.manufacturer_id}`} className="hover:underline">
+                                {p.manufacturer?.company_name}
+                              </Link>
+                            </TableCell>
+                            <TableCell className="font-semibold text-slate-900">
+                              {formatQty(avail)} {p.unit_of_measurement}
+                            </TableCell>
+                            <TableCell className="text-xs text-slate-600">{formatQty(reserved)}</TableCell>
+                            <TableCell className="text-xs text-slate-600">{formatQty(sold)}</TableCell>
+                            <TableCell className="text-xs text-slate-500">{formatQty(thresh)}</TableCell>
+                            <TableCell>
+                              <StatusBadge status={status} />
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button variant="outline" size="sm" onClick={() => openAdjustModal(p)}>
+                                Adjust Stock
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -364,65 +433,113 @@ export function InventoryPage() {
               <CardDescription>Every restock, manual correction, order reservation, release, and delivery deduction.</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Timestamp</TableHead>
-                    <TableHead>Product</TableHead>
-                    <TableHead>Movement Type</TableHead>
-                    <TableHead>Qty Delta</TableHead>
-                    <TableHead>Balance After</TableHead>
-                    <TableHead>Notes</TableHead>
-                    <TableHead>Recorded By</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {loadingMovements ? (
-                    <TableRow>
-                      <TableCell colSpan={7} className="py-10 text-center text-slate-500">
-                        Loading movement history...
-                      </TableCell>
-                    </TableRow>
-                  ) : movements.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={7} className="py-10 text-center text-slate-500">
-                        No inventory movements logged yet.
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    movements.map((m) => (
-                      <TableRow key={m.id}>
-                        <TableCell className="text-xs text-slate-500">{formatDateTime(m.created_at)}</TableCell>
-                        <TableCell>
-                          <p className="font-medium text-slate-900">{m.products?.name || "—"}</p>
-                          <p className="font-mono text-xs text-slate-500">{m.products?.sku}</p>
-                        </TableCell>
-                        <TableCell>
-                          <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium capitalize text-slate-700">
-                            {m.movement_type.replace("_", " ")}
-                          </span>
-                        </TableCell>
-                        <TableCell
+              <div className="divide-y divide-slate-100 md:hidden">
+                {loadingMovements ? (
+                  <p className="py-10 text-center text-sm text-slate-500">Loading movement history...</p>
+                ) : movements.length === 0 ? (
+                  <p className="py-10 text-center text-sm text-slate-500">No inventory movements logged yet.</p>
+                ) : (
+                  movements.map((m) => (
+                    <div key={m.id} className="space-y-2 p-4 text-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-slate-900">{m.products?.name || "—"}</p>
+                          <p className="font-mono text-slate-500">{m.products?.sku}</p>
+                        </div>
+                        <span
                           className={
                             Number(m.quantity_delta) > 0
-                              ? "font-semibold text-emerald-700"
+                              ? "shrink-0 font-bold text-emerald-700"
                               : Number(m.quantity_delta) < 0
-                              ? "font-semibold text-red-700"
-                              : "text-slate-500"
+                              ? "shrink-0 font-bold text-red-700"
+                              : "shrink-0 text-slate-500"
                           }
                         >
                           {Number(m.quantity_delta) > 0 ? `+${formatQty(m.quantity_delta)}` : formatQty(m.quantity_delta)}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="rounded bg-slate-100 px-2 py-0.5 font-medium capitalize text-slate-700">
+                          {m.movement_type.replace("_", " ")}
+                        </span>
+                        <span className="font-semibold text-slate-900">
+                          Bal: {formatQty(m.balance_after)} {m.products?.unit_of_measurement}
+                        </span>
+                      </div>
+
+                      {m.notes && <p className="text-slate-600">{m.notes}</p>}
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+                        <span>{m.users?.full_name || "System"}</span>
+                        <span>{formatDateTime(m.created_at)}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Timestamp</TableHead>
+                      <TableHead>Product</TableHead>
+                      <TableHead>Movement Type</TableHead>
+                      <TableHead>Qty Delta</TableHead>
+                      <TableHead>Balance After</TableHead>
+                      <TableHead>Notes</TableHead>
+                      <TableHead>Recorded By</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {loadingMovements ? (
+                      <TableRow>
+                        <TableCell colSpan={7} className="py-10 text-center text-slate-500">
+                          Loading movement history...
                         </TableCell>
-                        <TableCell className="font-semibold text-slate-900">
-                          {formatQty(m.balance_after)} {m.products?.unit_of_measurement}
-                        </TableCell>
-                        <TableCell className="text-xs text-slate-600">{m.notes || "—"}</TableCell>
-                        <TableCell className="text-xs text-slate-500">{m.users?.full_name || "System"}</TableCell>
                       </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
+                    ) : movements.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={7} className="py-10 text-center text-slate-500">
+                          No inventory movements logged yet.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      movements.map((m) => (
+                        <TableRow key={m.id}>
+                          <TableCell className="text-xs text-slate-500">{formatDateTime(m.created_at)}</TableCell>
+                          <TableCell>
+                            <p className="font-medium text-slate-900">{m.products?.name || "—"}</p>
+                            <p className="font-mono text-xs text-slate-500">{m.products?.sku}</p>
+                          </TableCell>
+                          <TableCell>
+                            <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium capitalize text-slate-700">
+                              {m.movement_type.replace("_", " ")}
+                            </span>
+                          </TableCell>
+                          <TableCell
+                            className={
+                              Number(m.quantity_delta) > 0
+                                ? "font-semibold text-emerald-700"
+                                : Number(m.quantity_delta) < 0
+                                ? "font-semibold text-red-700"
+                                : "text-slate-500"
+                            }
+                          >
+                            {Number(m.quantity_delta) > 0 ? `+${formatQty(m.quantity_delta)}` : formatQty(m.quantity_delta)}
+                          </TableCell>
+                          <TableCell className="font-semibold text-slate-900">
+                            {formatQty(m.balance_after)} {m.products?.unit_of_measurement}
+                          </TableCell>
+                          <TableCell className="text-xs text-slate-600">{m.notes || "—"}</TableCell>
+                          <TableCell className="text-xs text-slate-500">{m.users?.full_name || "System"}</TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>

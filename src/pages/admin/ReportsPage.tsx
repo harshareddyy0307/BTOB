@@ -1,7 +1,15 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import * as XLSX from "xlsx";
-import { BarChart3, Download, FileSpreadsheet } from "lucide-react";
+import { BarChart3, Download, FileSpreadsheet, FileDown, Building2, Factory, ShoppingBag, Layers, Loader2 } from "lucide-react";
+import {
+  exportAllCustomersPdf,
+  exportAllManufacturersPdf,
+  exportAllOrdersPdf,
+  exportMasterBusinessDataPdf,
+  fetchAgencySettingsForPdf,
+} from "@/lib/adminPdfExports";
+import { generateAnalyticsReportPdf } from "@/lib/pdfGenerator";
 import {
   ResponsiveContainer,
   AreaChart,
@@ -13,10 +21,18 @@ import {
   CartesianGrid,
   Tooltip,
 } from "recharts";
-import { supabase } from "@/lib/supabase";
+import { supabase, fetchAllRows } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatSignedCurrency } from "@/lib/pricing";
-import { cn, formatCurrency, formatDate, formatQty } from "@/lib/utils";
+import {
+  addLocalDays,
+  cn,
+  formatCurrency,
+  formatDate,
+  formatQty,
+  toLocalDateString,
+  toLocalMonthString,
+} from "@/lib/utils";
 import type { AdminProduct, CustomerProfile, InvoiceRecord, PurchaseOrderRecord } from "@/types/database";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +40,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/components/shared/StatusBadge";
+import { useToast } from "@/components/ui/toast";
 
 type ReportKey =
   | "daily_sales"
@@ -88,43 +105,61 @@ interface ReportOrder {
 
 export function ReportsPage() {
   const { branding } = useAuth();
+  const { toast } = useToast();
   const sym = branding.currency_symbol || "₹";
 
   const [activeReport, setActiveReport] = useState<ReportKey>("daily_sales");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [exportingMasterKey, setExportingMasterKey] = useState<
+    "customers" | "manufacturers" | "orders" | "all" | "active_report" | null
+  >(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["admin-reports-dataset"],
     queryFn: async () => {
-      const [ordersRes, posRes, invRes, prodRes, custRes] = await Promise.all([
-        supabase
-          .from("orders")
-          .select(
-            "id, order_number, customer_id, subtotal, tax_total, total_amount, paid_amount, due_amount, order_status, payment_status, placed_at, customers(id, business_name, city, state), order_items(id, product_id, product_name_snapshot, sku_snapshot, quantity, unit_selling_price, line_total, order_item_financials(manufacturer_id, manufacturer_name_snapshot, unit_manufacturer_price, margin_amount_total))"
-          )
-          .order("placed_at", { ascending: false }),
-        supabase
-          .from("purchase_orders")
-          .select("*, manufacturers(id, company_name)")
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("invoices")
-          .select("*, customers(*), orders(order_number, order_status)")
-          .order("due_date", { ascending: true }),
-        supabase
-          .from("products")
-          .select("*, manufacturer:manufacturers(id, company_name), category:categories(id, name), inventory(*), product_prices(*)")
-          .order("name"),
-        supabase.from("customers").select("*").order("business_name"),
+      const [orders, purchaseOrders, invoices, products, customers] = await Promise.all([
+        fetchAllRows<ReportOrder>((from, to) =>
+          supabase
+            .from("orders")
+            .select(
+              "id, order_number, customer_id, subtotal, tax_total, total_amount, paid_amount, due_amount, order_status, payment_status, placed_at, customers(id, business_name, city, state), order_items(id, product_id, product_name_snapshot, sku_snapshot, quantity, unit_selling_price, line_total, order_item_financials(manufacturer_id, manufacturer_name_snapshot, unit_manufacturer_price, margin_amount_total))"
+            )
+            .order("placed_at", { ascending: false })
+            .range(from, to)
+        ),
+        fetchAllRows<PurchaseOrderRecord>((from, to) =>
+          supabase
+            .from("purchase_orders")
+            .select("*, manufacturers(id, company_name)")
+            .order("created_at", { ascending: false })
+            .range(from, to)
+        ),
+        fetchAllRows<InvoiceRecord>((from, to) =>
+          supabase
+            .from("invoices")
+            .select("*, customers(*), orders(order_number, order_status)")
+            .order("due_date", { ascending: true })
+            .range(from, to)
+        ),
+        fetchAllRows<AdminProduct>((from, to) =>
+          supabase
+            .from("products")
+            .select("*, manufacturer:manufacturers(id, company_name), category:categories(id, name), inventory(*), product_prices(*)")
+            .order("name")
+            .range(from, to)
+        ),
+        fetchAllRows<CustomerProfile>((from, to) =>
+          supabase.from("customers").select("*").order("business_name").range(from, to)
+        ),
       ]);
 
       return {
-        orders: (ordersRes.data ?? []) as unknown as ReportOrder[],
-        purchaseOrders: (posRes.data ?? []) as unknown as PurchaseOrderRecord[],
-        invoices: (invRes.data ?? []) as unknown as InvoiceRecord[],
-        products: (prodRes.data ?? []) as unknown as AdminProduct[],
-        customers: (custRes.data ?? []) as CustomerProfile[],
+        orders,
+        purchaseOrders,
+        invoices,
+        products,
+        customers,
       };
     },
   });
@@ -136,16 +171,14 @@ export function ReportsPage() {
       return;
     }
     const end = new Date();
-    const start = new Date();
-    start.setDate(end.getDate() - days);
-    setFromDate(start.toISOString().slice(0, 10));
-    setToDate(end.toISOString().slice(0, 10));
+    setFromDate(addLocalDays(-days, end));
+    setToDate(toLocalDateString(end));
   };
 
   const computed = useMemo(() => {
     const orders = (data?.orders ?? []).filter((o) => {
       if (o.order_status === "Cancelled") return false;
-      const d = o.placed_at.slice(0, 10);
+      const d = toLocalDateString(o.placed_at);
       if (fromDate && d < fromDate) return false;
       if (toDate && d > toDate) return false;
       return true;
@@ -153,7 +186,7 @@ export function ReportsPage() {
 
     const pos = (data?.purchaseOrders ?? []).filter((p) => {
       if (p.status === "Cancelled") return false;
-      const d = p.created_at.slice(0, 10);
+      const d = toLocalDateString(p.created_at);
       if (fromDate && d < fromDate) return false;
       if (toDate && d > toDate) return false;
       return true;
@@ -222,7 +255,7 @@ export function ReportsPage() {
         prodSalesMap.set(item.product_id, pRow);
       }
 
-      const dayKey = o.placed_at.slice(0, 10);
+      const dayKey = toLocalDateString(o.placed_at);
       const dRow = dailyMap.get(dayKey) || { date: dayKey, orders: 0, subtotal: 0, gst: 0, total_sales: 0, gross_margin: 0 };
       dRow.orders += 1;
       dRow.subtotal += Number(o.subtotal);
@@ -231,7 +264,7 @@ export function ReportsPage() {
       dRow.gross_margin += orderMargin;
       dailyMap.set(dayKey, dRow);
 
-      const mKey = o.placed_at.slice(0, 7);
+      const mKey = toLocalMonthString(o.placed_at);
       const mRow = monthlyMap.get(mKey) || { month: mKey, orders: 0, subtotal: 0, gst: 0, total_sales: 0, gross_margin: 0 };
       mRow.orders += 1;
       mRow.subtotal += Number(o.subtotal);
@@ -298,7 +331,8 @@ export function ReportsPage() {
     }
 
     // 8. Outstanding Payments (all non-cancelled orders with remaining due_amount > 0, enriched with invoice meta if issued)
-    const todayMs = Date.now();
+    const nowLocal = new Date();
+    const todayStartMs = new Date(nowLocal.getFullYear(), nowLocal.getMonth(), nowLocal.getDate()).getTime();
     const invoiceByOrderId = new Map(invoices.map((inv) => [inv.order_id, inv]));
     const outstandingRows = orders
       .filter((o) => {
@@ -310,15 +344,16 @@ export function ReportsPage() {
         const total = Number(o.total_amount);
         const paid = Number(o.paid_amount ?? 0);
         const balance = Math.max(0, Number(o.due_amount ?? total - paid));
-        const defaultDueIso = new Date(new Date(o.placed_at).getTime() + 15 * 86400000).toISOString().slice(0, 10);
-        const dueDate = inv?.due_date || defaultDueIso;
-        const dueMs = new Date(dueDate).getTime();
-        const daysOverdue = Math.max(0, Math.floor((todayMs - dueMs) / (1000 * 60 * 60 * 24)));
+        const defaultDueIso = addLocalDays(15, new Date(o.placed_at));
+        const dueDate = toLocalDateString(inv?.due_date || defaultDueIso);
+        const [dy, dm, dd] = dueDate.split("-").map(Number);
+        const dueStartMs = new Date(dy, (dm || 1) - 1, dd || 1).getTime();
+        const daysOverdue = Math.max(0, Math.floor((todayStartMs - dueStartMs) / 86400000));
         return {
           invoice_number: inv ? inv.invoice_number : `${o.order_number} (No Invoice)`,
           customer: o.customers?.business_name || "—",
           order_number: o.order_number,
-          invoice_date: inv?.invoice_date || o.placed_at.slice(0, 10),
+          invoice_date: inv?.invoice_date || toLocalDateString(o.placed_at),
           due_date: dueDate,
           days_overdue: daysOverdue,
           total_amount: total,
@@ -389,7 +424,7 @@ export function ReportsPage() {
   const handleExport = (format: "xlsx" | "csv") => {
     const rows = getExportRows();
     const ws = XLSX.utils.json_to_sheet(rows.length > 0 ? rows : [{ message: "No records" }]);
-    const filename = `tradebridge-${activeReport}-${new Date().toISOString().slice(0, 10)}.${format}`;
+    const filename = `tradebridge-${activeReport}-${toLocalDateString()}.${format}`;
     if (format === "csv") {
       const csv = XLSX.utils.sheet_to_csv(ws);
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -406,20 +441,222 @@ export function ReportsPage() {
     }
   };
 
+  const handleExportActiveReportPdf = async () => {
+    if (exportingMasterKey) return;
+    setExportingMasterKey("active_report");
+    try {
+      const agency = await fetchAgencySettingsForPdf();
+      const reportTitle = REPORT_TABS.find((t) => t.key === activeReport)?.label || "Analytics Report";
+      const dateRangeLabel = fromDate || toDate ? `${fromDate || "Start"} to ${toDate || "Today"}` : "All Time";
+
+      let headers: string[] = [];
+      let rows: (string | number)[][] = [];
+      let rightAlignedCols: number[] = [];
+
+      switch (activeReport) {
+        case "daily_sales":
+          headers = ["Date", "Orders", "Taxable Subtotal", "GST Total", "Total Sales", "Gross Margin"];
+          rightAlignedCols = [1, 2, 3, 4, 5];
+          rows = computed.dailySales.map((r) => [
+            formatDate(r.date),
+            r.orders,
+            formatCurrency(r.subtotal, sym),
+            formatCurrency(r.gst, sym),
+            formatCurrency(r.total_sales, sym),
+            formatSignedCurrency(r.gross_margin, sym),
+          ]);
+          break;
+        case "monthly_sales":
+          headers = ["Month", "Orders", "Taxable Subtotal", "GST Total", "Total Sales", "Gross Margin"];
+          rightAlignedCols = [1, 2, 3, 4, 5];
+          rows = computed.monthlySales.map((r) => [
+            r.month,
+            r.orders,
+            formatCurrency(r.subtotal, sym),
+            formatCurrency(r.gst, sym),
+            formatCurrency(r.total_sales, sym),
+            formatSignedCurrency(r.gross_margin, sym),
+          ]);
+          break;
+        case "category_revenue":
+          headers = ["Category", "Units Ordered", "Customer Revenue", "Mfg Cost", "Gross Margin"];
+          rightAlignedCols = [1, 2, 3, 4];
+          rows = computed.categoryRevenue.map((r) => [
+            r.category,
+            formatQty(r.units),
+            formatCurrency(r.revenue, sym),
+            formatCurrency(r.mfg_cost, sym),
+            formatSignedCurrency(r.gross_margin, sym),
+          ]);
+          break;
+        case "manufacturer_purchases":
+          headers = ["Manufacturer", "PO Count", "PO Subtotal", "Input GST", "Total PO Value", "Received Goods Value"];
+          rightAlignedCols = [1, 2, 3, 4, 5];
+          rows = computed.manufacturerPurchases.map((r) => [
+            r.manufacturer,
+            r.po_count,
+            formatCurrency(r.subtotal, sym),
+            formatCurrency(r.tax, sym),
+            formatCurrency(r.total_purchases, sym),
+            formatCurrency(r.received_value, sym),
+          ]);
+          break;
+        case "product_sales":
+          headers = ["Product", "SKU", "Category", "Manufacturer", "Units Sold", "Sales Revenue", "Gross Margin"];
+          rightAlignedCols = [4, 5, 6];
+          rows = computed.productSales.map((r) => [
+            r.product_name,
+            r.sku,
+            r.category,
+            r.manufacturer,
+            formatQty(r.units_sold),
+            formatCurrency(r.revenue, sym),
+            formatSignedCurrency(r.gross_margin, sym),
+          ]);
+          break;
+        case "customer_orders":
+          headers = ["Customer Business", "City / State", "Orders Placed", "Total Ordered Value"];
+          rightAlignedCols = [2, 3];
+          rows = computed.customerOrders.map((r) => [
+            r.business_name,
+            r.city_state || "-",
+            r.order_count,
+            formatCurrency(r.total_ordered, sym),
+          ]);
+          break;
+        case "gross_margins":
+          headers = ["Order #", "Date", "Customer", "Taxable Sales", "Mfg Cost", "Margin Amt", "Margin %"];
+          rightAlignedCols = [3, 4, 5, 6];
+          rows = computed.grossMargins.map((r) => [
+            r.order_number,
+            formatDate(r.date),
+            r.customer,
+            formatCurrency(r.selling_total, sym),
+            formatCurrency(r.mfg_cost, sym),
+            formatSignedCurrency(r.gross_margin, sym),
+            `${r.margin_pct}%`,
+          ]);
+          break;
+        case "outstanding_payments":
+          headers = ["Order #", "Invoice #", "Customer", "Due Date", "Overdue", "Total", "Paid", "Balance Due", "Status"];
+          rightAlignedCols = [5, 6, 7];
+          rows = computed.outstandingPayments.map((r) => [
+            r.order_number,
+            r.invoice_number,
+            r.customer,
+            formatDate(r.due_date),
+            r.days_overdue > 0 ? `${r.days_overdue} days` : "Current",
+            formatCurrency(r.total_amount, sym),
+            formatCurrency(r.paid_amount, sym),
+            formatCurrency(r.balance_due, sym),
+            r.payment_status.replace("_", " ").toUpperCase(),
+          ]);
+          break;
+        case "inventory_status":
+          headers = ["Product", "SKU", "Category", "Manufacturer", "Available", "Reserved", "Sold", "Status", "Stock Cost Value"];
+          rightAlignedCols = [4, 5, 6, 8];
+          rows = computed.inventoryStatus.map((r) => [
+            r.product_name,
+            r.sku,
+            r.category,
+            r.manufacturer,
+            `${formatQty(r.available_qty)} ${r.unit}`,
+            formatQty(r.reserved_qty),
+            formatQty(r.sold_qty),
+            r.stock_status.replace("_", " ").toUpperCase(),
+            formatCurrency(r.stock_cost_value, sym),
+          ]);
+          break;
+      }
+
+      generateAnalyticsReportPdf({
+        agency,
+        reportTitle,
+        reportKey: activeReport,
+        dateRangeLabel,
+        headers,
+        rows,
+        rightAlignedCols,
+      });
+
+      toast({ title: `${reportTitle} PDF downloaded`, type: "success" });
+    } catch (err) {
+      toast({
+        title: "Could not export Report PDF",
+        description: err instanceof Error ? err.message : "Error",
+        type: "error",
+      });
+    } finally {
+      setExportingMasterKey(null);
+    }
+  };
+
+  const handleMasterPdfDownload = async (kind: "customers" | "manufacturers" | "orders" | "all") => {
+    if (exportingMasterKey) return;
+    setExportingMasterKey(kind);
+    try {
+      if (kind === "customers") {
+        const r = await exportAllCustomersPdf();
+        toast({
+          title: "All Customers PDF downloaded",
+          description: `${r.customerCount} customer(s), ${r.addressCount} addresses, ${r.customPriceCount} custom price rules.`,
+          type: "success",
+        });
+      } else if (kind === "manufacturers") {
+        const r = await exportAllManufacturersPdf();
+        toast({
+          title: "All Manufacturers PDF downloaded",
+          description: `${r.manufacturerCount} manufacturer(s), ${r.productCount} products, ${r.poCount} purchase orders.`,
+          type: "success",
+        });
+      } else if (kind === "orders") {
+        const r = await exportAllOrdersPdf();
+        toast({
+          title: "All Order Details PDF downloaded",
+          description: `${r.orderCount} order(s) and ${r.lineItemCount} detailed line items.`,
+          type: "success",
+        });
+      } else {
+        const r = await exportMasterBusinessDataPdf();
+        toast({
+          title: "Complete Master Data PDF downloaded",
+          description: `Combined ${r.customerCount} customers, ${r.manufacturerCount} manufacturers (${r.productCount} SKUs), and ${r.orderCount} orders.`,
+          type: "success",
+        });
+      }
+    } catch (err) {
+      toast({
+        title: "Master PDF export failed",
+        description: err instanceof Error ? err.message : "Error",
+        type: "error",
+      });
+    } finally {
+      setExportingMasterKey(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>
-          <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight text-slate-900">
-            <BarChart3 className="h-6 w-6 text-blue-700" />
+          <h1 className="flex items-center gap-2 text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
+            <BarChart3 className="h-5 w-5 shrink-0 text-blue-700 sm:h-6 sm:w-6" />
             Reports &amp; Analytics
           </h1>
           <p className="text-sm text-slate-500">
-            Real-time operational &amp; financial reports derived from Postgres records with CSV &amp; Excel exports.
+            Real-time operational, master data &amp; financial reports derived from Postgres records with PDF, CSV &amp; Excel exports.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleExportActiveReportPdf} disabled={Boolean(exportingMasterKey)}>
+            {exportingMasterKey === "active_report" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <FileDown className="h-4 w-4" />
+            )}
+            Export Report PDF
+          </Button>
           <Button variant="outline" size="sm" onClick={() => handleExport("csv")}>
             <Download className="h-4 w-4" />
             Export CSV
@@ -431,17 +668,87 @@ export function ReportsPage() {
         </div>
       </div>
 
+      {/* Master Data PDF Downloads */}
+      <Card className="border-blue-200 bg-blue-50/40">
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base text-slate-900">
+            <FileDown className="h-4 w-4 shrink-0 text-blue-700" />
+            Complete Master Data Exports (PDF)
+          </CardTitle>
+          <CardDescription>
+            Download complete internal PDF archives covering all customers, manufacturers &amp; product catalogs, and all order line-item &amp; financial details.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-2 pt-0 sm:flex sm:flex-wrap sm:gap-2.5">
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full justify-start bg-white sm:w-auto sm:justify-center"
+            onClick={() => handleMasterPdfDownload("customers")}
+            disabled={Boolean(exportingMasterKey)}
+          >
+            {exportingMasterKey === "customers" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Building2 className="h-4 w-4 text-blue-700" />
+            )}
+            All Customers PDF
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full justify-start bg-white sm:w-auto sm:justify-center"
+            onClick={() => handleMasterPdfDownload("manufacturers")}
+            disabled={Boolean(exportingMasterKey)}
+          >
+            {exportingMasterKey === "manufacturers" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Factory className="h-4 w-4 text-blue-700" />
+            )}
+            All Manufacturers &amp; Products PDF
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full justify-start bg-white sm:w-auto sm:justify-center"
+            onClick={() => handleMasterPdfDownload("orders")}
+            disabled={Boolean(exportingMasterKey)}
+          >
+            {exportingMasterKey === "orders" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <ShoppingBag className="h-4 w-4 text-blue-700" />
+            )}
+            All Order Details PDF
+          </Button>
+          <Button
+            size="sm"
+            className="w-full justify-start sm:w-auto sm:justify-center"
+            onClick={() => handleMasterPdfDownload("all")}
+            disabled={Boolean(exportingMasterKey)}
+          >
+            {exportingMasterKey === "all" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Layers className="h-4 w-4" />
+            )}
+            Complete All-in-One Master PDF
+          </Button>
+        </CardContent>
+      </Card>
+
       {/* Date Filter Bar */}
       <Card>
-        <CardContent className="flex flex-wrap items-end justify-between gap-4 p-4">
-          <div className="flex flex-wrap items-end gap-3">
+        <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between sm:gap-4">
+          <div className="grid w-full grid-cols-2 gap-3 sm:flex sm:w-auto sm:flex-wrap sm:items-end">
             <div className="space-y-1">
               <Label className="text-xs">From Date</Label>
-              <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="w-40" />
+              <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="w-full sm:w-40" />
             </div>
             <div className="space-y-1">
               <Label className="text-xs">To Date</Label>
-              <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="w-40" />
+              <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="w-full sm:w-40" />
             </div>
           </div>
 
@@ -463,11 +770,12 @@ export function ReportsPage() {
       </Card>
 
       {/* 9-Report Pill Selector */}
-      <div className="flex flex-wrap gap-2">
+      <div className="flex gap-2 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-visible sm:pb-0">
         {REPORT_TABS.map((t) => (
           <Button
             key={t.key}
             size="sm"
+            className="shrink-0"
             variant={activeReport === t.key ? "default" : "outline"}
             onClick={() => setActiveReport(t.key)}
           >
@@ -486,12 +794,12 @@ export function ReportsPage() {
               <CardHeader>
                 <CardTitle className="text-base">Daily Sales Trend</CardTitle>
               </CardHeader>
-              <CardContent className="h-64">
+              <CardContent className="h-56 sm:h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={computed.dailySales}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                     <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#64748b" }} />
-                    <YAxis tick={{ fontSize: 11, fill: "#64748b" }} />
+                    <YAxis width={48} tick={{ fontSize: 11, fill: "#64748b" }} />
                     <Tooltip formatter={(val: number) => formatCurrency(val, sym)} />
                     <Area type="monotone" dataKey="total_sales" name="Sales" stroke="#1d4ed8" fill="#dbeafe" strokeWidth={2} />
                     <Area type="monotone" dataKey="gross_margin" name="Margin" stroke="#047857" fill="#d1fae5" strokeWidth={2} />
@@ -506,12 +814,12 @@ export function ReportsPage() {
               <CardHeader>
                 <CardTitle className="text-base">Monthly Revenue vs Gross Margin</CardTitle>
               </CardHeader>
-              <CardContent className="h-64">
+              <CardContent className="h-56 sm:h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={computed.monthlySales}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                     <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#64748b" }} />
-                    <YAxis tick={{ fontSize: 11, fill: "#64748b" }} />
+                    <YAxis width={48} tick={{ fontSize: 11, fill: "#64748b" }} />
                     <Tooltip formatter={(val: number) => formatCurrency(val, sym)} />
                     <Bar dataKey="total_sales" name="Total Sales" fill="#1e40af" radius={[4, 4, 0, 0]} />
                     <Bar dataKey="gross_margin" name="Gross Margin" fill="#059669" radius={[4, 4, 0, 0]} />
@@ -526,12 +834,12 @@ export function ReportsPage() {
               <CardHeader>
                 <CardTitle className="text-base">Category-wise Revenue Comparison</CardTitle>
               </CardHeader>
-              <CardContent className="h-64">
+              <CardContent className="h-56 sm:h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={computed.categoryRevenue}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                     <XAxis dataKey="category" tick={{ fontSize: 11, fill: "#64748b" }} />
-                    <YAxis tick={{ fontSize: 11, fill: "#64748b" }} />
+                    <YAxis width={48} tick={{ fontSize: 11, fill: "#64748b" }} />
                     <Tooltip formatter={(val: number) => formatCurrency(val, sym)} />
                     <Bar dataKey="revenue" name="Revenue" fill="#0f766e" radius={[4, 4, 0, 0]} />
                   </BarChart>

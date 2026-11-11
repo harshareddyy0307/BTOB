@@ -101,7 +101,7 @@ export function CustomerPaymentNoticeDialog({ order, onClose }: CustomerPaymentN
 
         {order && (
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="grid grid-cols-3 gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs">
+            <div className="grid grid-cols-1 gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs sm:grid-cols-3">
               <div>
                 <p className="text-slate-500">Order Total</p>
                 <p className="font-bold text-slate-900">{formatCurrency(order.total_amount, sym)}</p>

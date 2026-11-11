@@ -9,9 +9,15 @@ import {
   type MarginRuleSummary,
 } from "@/lib/pricing";
 import { invalidateCatalogQueries } from "@/lib/productPublishing";
+import { useAuth } from "@/contexts/AuthContext";
 import { formatCurrency } from "@/lib/utils";
 import type { AdminProduct, Category, Manufacturer } from "@/types/database";
-import { ProductPhotoEditor, type ProductPhotoDraft } from "@/components/admin/ProductPhotoEditor";
+import {
+  ProductPhotoEditor,
+  cleanupUnusedProductStoragePhotos,
+  finalizeProductPhotoDrafts,
+  type ProductPhotoDraft,
+} from "@/components/admin/ProductPhotoEditor";
 import { sortProductImages } from "@/components/admin/ProductPhotoDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,6 +49,8 @@ export function ProductFormDialog({
   categories,
   onSaved,
 }: ProductFormDialogProps) {
+  const { branding } = useAuth();
+  const sym = branding.currency_symbol || "₹";
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [saving, setSaving] = useState(false);
@@ -139,11 +147,33 @@ export function ProductFormDialog({
       return;
     }
 
-    const mfgPriceNum = Math.max(0, Number(manufacturerPrice) || 0);
+    const parsedMfgPrice = Number(manufacturerPrice);
+    if (!Number.isFinite(parsedMfgPrice) || parsedMfgPrice < 0) {
+      toast({ title: "Enter a valid non-negative manufacturer price", type: "error" });
+      return;
+    }
+    const parsedMoq = Number(moq);
+    if (!Number.isFinite(parsedMoq) || parsedMoq <= 0) {
+      toast({ title: "Minimum Order Quantity must be greater than 0", type: "error" });
+      return;
+    }
+    const parsedGst = Number(gstRate);
+    if (!Number.isFinite(parsedGst) || parsedGst < 0 || parsedGst > 100) {
+      toast({ title: "GST rate must be between 0 and 100", type: "error" });
+      return;
+    }
+    const parsedStock = Number(initialStock);
+    const parsedThreshold = Number(lowStockThreshold);
+    if (!Number.isFinite(parsedStock) || parsedStock < 0 || !Number.isFinite(parsedThreshold) || parsedThreshold < 0) {
+      toast({ title: "Stock and alert threshold must be zero or greater", type: "error" });
+      return;
+    }
+
+    const mfgPriceNum = Math.max(0, parsedMfgPrice);
     if (publishImmediately && livePricingPreview.sellingPrice <= 0) {
       toast({
-        title: "Cannot publish with ₹0 selling price",
-        description: "Enter a manufacturer price above ₹0 before publishing to Customer Catalog.",
+        title: `Cannot publish with ${sym}0 selling price`,
+        description: `Enter a manufacturer price above ${sym}0 before publishing to Customer Catalog.`,
         type: "error",
       });
       return;
@@ -152,6 +182,7 @@ export function ProductFormDialog({
     setSaving(true);
     try {
       const isEdit = Boolean(product && !duplicateMode);
+      const previousUrls = isEdit ? (product?.product_images ?? []).map((img) => img.image_url) : [];
       const payload = {
         manufacturer_id: manufacturerId,
         category_id: categoryId,
@@ -159,9 +190,9 @@ export function ProductFormDialog({
         sku: sku.trim().toUpperCase(),
         description: description.trim() || null,
         unit_of_measurement: unit.trim() || "pcs",
-        min_order_quantity: Number(moq) || 1,
+        min_order_quantity: parsedMoq,
         hsn_code: hsnCode.trim() || null,
-        gst_rate: Number(gstRate) || 0,
+        gst_rate: parsedGst,
         status,
         is_featured: isFeatured,
         is_published: publishImmediately ? (isEdit && product ? product.is_published : false) : false,
@@ -178,12 +209,18 @@ export function ProductFormDialog({
         targetProductId = inserted.id;
       }
 
-      // Sync product images
-      const { error: delImgErr } = await supabase.from("product_images").delete().eq("product_id", targetProductId);
-      if (delImgErr) throw delImgErr;
-      if (images.length > 0) {
-        const hasPrimary = images.some((i) => i.is_primary);
-        const imgRows = images.map((img, i) => ({
+      if (!targetProductId) throw new Error("Missing product ID");
+
+      // Upload staged photos now & insert replacements before deleting previous rows
+      const { data: existingImgRows } = isEdit
+        ? await supabase.from("product_images").select("id").eq("product_id", targetProductId)
+        : { data: [] as { id: string }[] };
+      const existingImgIds = (existingImgRows ?? []).map((r) => r.id);
+
+      const finalizedPhotos = await finalizeProductPhotoDrafts(images, `catalog/${targetProductId}`);
+      if (finalizedPhotos.length > 0) {
+        const hasPrimary = finalizedPhotos.some((i) => i.is_primary);
+        const imgRows = finalizedPhotos.map((img, i) => ({
           product_id: targetProductId,
           image_url: img.image_url,
           is_primary: hasPrimary ? img.is_primary : i === 0,
@@ -192,10 +229,21 @@ export function ProductFormDialog({
         const { error: imgErr } = await supabase.from("product_images").insert(imgRows);
         if (imgErr) throw imgErr;
       }
+      if (existingImgIds.length > 0) {
+        const { error: delImgErr } = await supabase.from("product_images").delete().in("id", existingImgIds);
+        if (delImgErr) throw delImgErr;
+      }
 
-      // Ensure inventory record exists / updates threshold
-      const qtyVal = Math.max(0, Number(initialStock) || 0);
-      const thresholdVal = Math.max(0, Number(lowStockThreshold) || 10);
+      if (isEdit) {
+        await cleanupUnusedProductStoragePhotos(
+          previousUrls,
+          finalizedPhotos.map((p) => p.image_url)
+        );
+      }
+
+      // Ensure inventory record exists & tracks stock movements cleanly
+      const qtyVal = Math.max(0, parsedStock);
+      const thresholdVal = Math.max(0, parsedThreshold);
 
       if (!isEdit) {
         const { error: invErr } = await supabase.from("inventory").insert({
@@ -216,14 +264,15 @@ export function ProductFormDialog({
           if (movErr) throw movErr;
         }
       } else {
-        const { error: invErr } = await supabase.from("inventory").upsert(
-          {
-            product_id: targetProductId,
-            available_quantity: qtyVal,
-            low_stock_threshold: thresholdVal,
-          },
-          { onConflict: "product_id" }
-        );
+        const prevQty = Number(product?.inventory?.available_quantity ?? 0);
+        const delta = Math.round((qtyVal - prevQty) * 100) / 100;
+        const { error: invErr } = await supabase.rpc("adjust_product_stock_and_threshold_admin", {
+          p_product_id: targetProductId,
+          p_quantity_delta: delta,
+          p_low_stock_threshold: thresholdVal,
+          p_movement_type: "adjustment",
+          p_notes: "Adjusted in product editor",
+        });
         if (invErr) throw invErr;
       }
 
@@ -243,7 +292,11 @@ export function ProductFormDialog({
         if (pubErr) throw pubErr;
       }
 
-      await invalidateCatalogQueries(queryClient);
+      await Promise.all([
+        invalidateCatalogQueries(queryClient),
+        queryClient.invalidateQueries({ queryKey: ["admin-inventory"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-inventory-movements"] }),
+      ]);
 
       toast({
         title: isEdit ? "Product updated" : duplicateMode ? "Product duplicated" : "Product added",
@@ -321,7 +374,7 @@ export function ProductFormDialog({
           <ProductPhotoEditor
             photos={images}
             onChange={setImages}
-            storageFolder={product?.id && !duplicateMode ? `catalog/${product.id}` : "catalog"}
+            disabled={saving}
             compact
           />
 
@@ -330,9 +383,9 @@ export function ProductFormDialog({
             <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
             <div className="space-y-1.5">
-              <Label>Manufacturer Price (₹) *</Label>
+              <Label>Manufacturer Price ({sym}) *</Label>
               <Input
                 type="number"
                 step="0.01"
@@ -367,7 +420,7 @@ export function ProductFormDialog({
             </div>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
             <div className="space-y-1.5">
               <Label>Available Stock</Label>
               <Input
@@ -410,19 +463,19 @@ export function ProductFormDialog({
             <span>
               Effective Rule: <strong className="uppercase">{effectiveMargin.source}</strong> (
               {effectiveMargin.marginPercentage}%) &bull; Draft Selling Price:{" "}
-              <strong className="text-blue-700">{formatCurrency(livePricingPreview.sellingPrice)}</strong> (Margin{" "}
-              {formatSignedCurrency(livePricingPreview.marginAmount)})
+              <strong className="text-blue-700">{formatCurrency(livePricingPreview.sellingPrice, sym)}</strong> (Margin{" "}
+              {formatSignedCurrency(livePricingPreview.marginAmount, sym)})
             </span>
             {product?.product_prices && !duplicateMode && (
               <span>
                 {" "}
                 &bull; Live Published Price:{" "}
-                <strong>{formatCurrency(product.product_prices.published_selling_price)}</strong>
+                <strong>{formatCurrency(product.product_prices.published_selling_price, sym)}</strong>
               </span>
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-6 rounded-md border border-slate-200 bg-slate-50/70 p-3">
+          <div className="flex flex-wrap items-center gap-4 rounded-md border border-slate-200 bg-slate-50/70 p-3 sm:gap-6">
             <div className="flex items-center gap-2.5">
               <Switch checked={isFeatured} onCheckedChange={setIsFeatured} />
               <Label>Featured in Customer Portal</Label>

@@ -33,7 +33,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={{ toast }}>
       {children}
-      <div className="fixed bottom-4 right-4 z-[100] flex max-w-sm flex-col gap-2">
+      <div className="fixed inset-x-3 bottom-3 z-[100] flex flex-col gap-2 sm:inset-x-auto sm:bottom-4 sm:right-4 sm:max-w-sm">
         {toasts.map((t) => (
           <div
             key={t.id}
@@ -47,7 +47,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
             {t.type === "success" && <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />}
             {t.type === "error" && <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />}
             {t.type === "info" && <Info className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />}
-            <div className="flex-1 text-sm">
+            <div className="min-w-0 flex-1 break-words text-sm">
               <p className="font-semibold text-slate-900">{t.title}</p>
               {t.description && <p className="mt-0.5 text-xs text-slate-600">{t.description}</p>}
             </div>

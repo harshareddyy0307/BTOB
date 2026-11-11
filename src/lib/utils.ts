@@ -51,3 +51,38 @@ export function slugify(text: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)+/g, "");
 }
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+/**
+ * Returns `YYYY-MM-DD` in the user's local timezone (avoids UTC `.toISOString().slice(0, 10)`
+ * shifting dates backwards for IST/positive UTC offsets).
+ */
+export function toLocalDateString(value: Date | string | null | undefined = new Date()): string {
+  if (!value) return "";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  }
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+/**
+ * Returns `YYYY-MM` in the user's local timezone for monthly trend bucketing.
+ */
+export function toLocalMonthString(value: Date | string | null | undefined = new Date()): string {
+  const localDate = toLocalDateString(value);
+  return localDate ? localDate.slice(0, 7) : "";
+}
+
+/**
+ * Returns `YYYY-MM-DD` shifted by `days` calendar days in local time.
+ */
+export function addLocalDays(days: number, from: Date = new Date()): string {
+  const d = new Date(from.getFullYear(), from.getMonth(), from.getDate() + days);
+  return toLocalDateString(d);
+}

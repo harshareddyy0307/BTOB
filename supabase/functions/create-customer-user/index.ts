@@ -7,18 +7,37 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+const EMAIL_RE = /^[^\s@%]+@[^\s@%]+\.[^\s@%]{2,}$/;
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function canonicalPhone(raw: string): string {
+  const digits = raw.replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.length === 13 && digits.startsWith("091")) return digits.slice(3);
+  if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
+  if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1);
+  return digits;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
+  if (req.method !== "POST") {
+    return jsonResponse({ error: "Method not allowed" }, 405);
+  }
+
   try {
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) {
-      return new Response(JSON.stringify({ error: "Missing authorization header" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Missing authorization header" }, 401);
     }
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
@@ -31,10 +50,7 @@ Deno.serve(async (req: Request) => {
     });
     const token = authHeader.replace(/^Bearer\s+/i, "").trim();
     if (!token) {
-      return new Response(JSON.stringify({ error: "Missing bearer token" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Missing bearer token" }, 401);
     }
     const {
       data: { user: caller },
@@ -46,10 +62,7 @@ Deno.serve(async (req: Request) => {
         callerError?.code === "session_not_found" || callerError?.message?.toLowerCase().includes("session")
           ? "Session expired or signed out. Please sign in again."
           : callerError?.message || "Invalid session token";
-      return new Response(JSON.stringify({ error: msg }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: msg }, 401);
     }
 
     const adminClient = createClient(supabaseUrl, serviceRoleKey, {
@@ -64,41 +77,38 @@ Deno.serve(async (req: Request) => {
 
     const callerRole = (callerProfile?.roles as unknown as { name: string })?.name;
     if (!callerProfile?.is_active || !["admin", "staff"].includes(callerRole)) {
-      return new Response(JSON.stringify({ error: "Forbidden: Admin or Staff access required" }), {
-        status: 403,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Forbidden: Admin or Staff access required" }, 403);
     }
 
-    const body = await req.json();
-    const {
-      business_name,
-      owner_name,
-      phone,
-      email,
-      password,
-      business_address,
-      city,
-      state,
-      pincode,
-      gst_number,
-      business_category,
-      status = "active",
-    } = body;
+    const body = await req.json().catch(() => null);
+    const business_name = String(body?.business_name ?? "").trim();
+    const owner_name = String(body?.owner_name ?? "").trim();
+    const phone = String(body?.phone ?? "").trim();
+    const email = String(body?.email ?? "").trim().toLowerCase();
+    const rawPassword = typeof body?.password === "string" ? body.password.trim() : "";
+    const business_address = String(body?.business_address ?? "").trim();
+    const city = String(body?.city ?? "").trim();
+    const state = String(body?.state ?? "").trim() || "Telangana";
+    const pincode = String(body?.pincode ?? "").trim();
+    const gst_number = String(body?.gst_number ?? "").trim().toUpperCase();
+    const business_category = String(body?.business_category ?? "").trim();
+    const status = String(body?.status ?? "active").trim().toLowerCase();
 
     if (!business_name || !owner_name || !phone || !email || !business_address) {
-      return new Response(JSON.stringify({ error: "Missing required customer fields" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Missing required customer fields" }, 400);
     }
 
-    const rawPassword = typeof password === "string" ? password.trim() : "";
+    if (!EMAIL_RE.test(email) || email.length > 160 || /[\r\n\t]/.test(email)) {
+      return jsonResponse({ error: "Enter a valid business email address" }, 400);
+    }
+
+    const cleanPhone = canonicalPhone(phone);
+    if (cleanPhone.length < 7 || cleanPhone.length > 15) {
+      return jsonResponse({ error: "Enter a valid phone number" }, 400);
+    }
+
     if (rawPassword.length > 0 && rawPassword.length < 8) {
-      return new Response(JSON.stringify({ error: "Password must be at least 8 characters when provided" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Password must be at least 8 characters when provided" }, 400);
     }
 
     const generateInternalSecret = () => {
@@ -108,10 +118,22 @@ Deno.serve(async (req: Request) => {
     const effectivePassword = rawPassword.length >= 8 ? rawPassword : generateInternalSecret();
 
     if (!["active", "inactive", "suspended"].includes(status)) {
-      return new Response(JSON.stringify({ error: "Status must be active, inactive, or suspended" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Status must be active, inactive, or suspended" }, 400);
+    }
+
+    // Check duplicate email or canonical phone cleanly before creating auth user
+    const [{ data: dupCustEmail }, { data: dupUserEmail }, { data: dupPhone }] = await Promise.all([
+      adminClient.from("customers").select("id").eq("email", email).maybeSingle(),
+      adminClient.from("users").select("id").eq("email", email).maybeSingle(),
+      adminClient.rpc("find_customers_by_canonical_phone", { p_phone: cleanPhone }),
+    ]);
+
+    if (dupCustEmail || dupUserEmail) {
+      return jsonResponse({ error: "A user or customer business with this email already exists." }, 409);
+    }
+
+    if (Array.isArray(dupPhone) && dupPhone.length > 0) {
+      return jsonResponse({ error: "Another customer business already uses this phone number." }, 409);
     }
 
     const { data: customerRole, error: roleErr } = await adminClient
@@ -121,14 +143,11 @@ Deno.serve(async (req: Request) => {
       .single();
 
     if (roleErr || !customerRole) {
-      return new Response(JSON.stringify({ error: "Customer role missing in database" }), {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Customer role missing in database" }, 500);
     }
 
     const { data: authData, error: createAuthErr } = await adminClient.auth.admin.createUser({
-      email: String(email).trim().toLowerCase(),
+      email,
       password: effectivePassword,
       email_confirm: true,
       app_metadata: { role: "customer" },
@@ -136,10 +155,7 @@ Deno.serve(async (req: Request) => {
     });
 
     if (createAuthErr || !authData.user) {
-      return new Response(JSON.stringify({ error: createAuthErr?.message || "Failed to create auth user" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: createAuthErr?.message || "Failed to create auth user" }, 400);
     }
 
     const newUserId = authData.user.id;
@@ -150,10 +166,7 @@ Deno.serve(async (req: Request) => {
       });
       if (banErr) {
         await adminClient.auth.admin.deleteUser(newUserId);
-        return new Response(JSON.stringify({ error: banErr.message }), {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResponse({ error: banErr.message }, 400);
       }
     }
 
@@ -161,17 +174,14 @@ Deno.serve(async (req: Request) => {
       id: newUserId,
       role_id: customerRole.id,
       full_name: owner_name,
-      email: String(email).trim().toLowerCase(),
+      email,
       phone,
       is_active: status === "active",
     });
 
     if (userInsertErr) {
       await adminClient.auth.admin.deleteUser(newUserId);
-      return new Response(JSON.stringify({ error: userInsertErr.message }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: userInsertErr.message }, userInsertErr.code === "23505" ? 409 : 400);
     }
 
     const { data: customer, error: custErr } = await adminClient
@@ -181,10 +191,10 @@ Deno.serve(async (req: Request) => {
         business_name,
         owner_name,
         phone,
-        email: String(email).trim().toLowerCase(),
+        email,
         business_address,
         city: city || null,
-        state: state || "Telangana",
+        state,
         pincode: pincode || null,
         gst_number: gst_number || null,
         business_category: business_category || null,
@@ -196,10 +206,16 @@ Deno.serve(async (req: Request) => {
     if (custErr || !customer) {
       await adminClient.from("users").delete().eq("id", newUserId);
       await adminClient.auth.admin.deleteUser(newUserId);
-      return new Response(JSON.stringify({ error: custErr?.message || "Failed to create customer profile" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      const code = custErr?.code === "23505" ? 409 : 400;
+      return jsonResponse(
+        {
+          error:
+            custErr?.code === "23505"
+              ? "A customer business with this email or phone number already exists."
+              : custErr?.message || "Failed to create customer profile",
+        },
+        code
+      );
     }
 
     await adminClient.from("customer_addresses").insert({
@@ -209,7 +225,7 @@ Deno.serve(async (req: Request) => {
       contact_phone: phone,
       address_line: business_address,
       city: city || "Hyderabad",
-      state: state || "Telangana",
+      state,
       pincode: pincode || "500001",
       is_default: true,
     });
@@ -222,14 +238,8 @@ Deno.serve(async (req: Request) => {
       new_data: { business_name, email, status },
     });
 
-    return new Response(JSON.stringify({ customer, user_id: newUserId }), {
-      status: 201,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return jsonResponse({ customer, user_id: newUserId }, 201);
   } catch (err) {
-    return new Response(JSON.stringify({ error: err instanceof Error ? err.message : "Unexpected error" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return jsonResponse({ error: err instanceof Error ? err.message : "Unexpected error" }, 500);
   }
 });

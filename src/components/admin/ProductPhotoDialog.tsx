@@ -4,7 +4,12 @@ import { Camera, Loader2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import type { AdminProduct } from "@/types/database";
-import { ProductPhotoEditor, type ProductPhotoDraft } from "@/components/admin/ProductPhotoEditor";
+import {
+  ProductPhotoEditor,
+  cleanupUnusedProductStoragePhotos,
+  finalizeProductPhotoDrafts,
+  type ProductPhotoDraft,
+} from "@/components/admin/ProductPhotoEditor";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
@@ -45,15 +50,18 @@ export function ProductPhotoDialog({ open, onOpenChange, product, onSaved }: Pro
     if (!product) return;
     setSaving(true);
     try {
+      const previousUrls = (product.product_images ?? []).map((img) => img.image_url);
+      const finalized = await finalizeProductPhotoDrafts(photos, `catalog/${product.id}`);
+
       const { error: delErr } = await supabase
         .from("product_images")
         .delete()
         .eq("product_id", product.id);
       if (delErr) throw delErr;
 
-      if (photos.length > 0) {
-        const hasPrimary = photos.some((p) => p.is_primary);
-        const rows = photos.map((p, i) => ({
+      if (finalized.length > 0) {
+        const hasPrimary = finalized.some((p) => p.is_primary);
+        const rows = finalized.map((p, i) => ({
           product_id: product.id,
           image_url: p.image_url,
           is_primary: hasPrimary ? p.is_primary : i === 0,
@@ -63,6 +71,11 @@ export function ProductPhotoDialog({ open, onOpenChange, product, onSaved }: Pro
         if (insErr) throw insErr;
       }
 
+      await cleanupUnusedProductStoragePhotos(
+        previousUrls,
+        finalized.map((p) => p.image_url)
+      );
+
       if (userProfile?.id) {
         await supabase.from("audit_logs").insert({
           actor_user_id: userProfile.id,
@@ -71,7 +84,7 @@ export function ProductPhotoDialog({ open, onOpenChange, product, onSaved }: Pro
           entity_id: product.id,
           new_data: {
             product_name: product.name,
-            photo_count: photos.length,
+            photo_count: finalized.length,
           },
         });
       }
@@ -89,8 +102,8 @@ export function ProductPhotoDialog({ open, onOpenChange, product, onSaved }: Pro
       toast({
         title: "Product photos saved",
         description:
-          photos.length > 0
-            ? `${photos.length} photo${photos.length > 1 ? "s" : ""} updated for "${product.name}".`
+          finalized.length > 0
+            ? `${finalized.length} photo${finalized.length > 1 ? "s" : ""} updated for "${product.name}".`
             : `All photos removed from "${product.name}".`,
         type: "success",
       });
@@ -126,7 +139,7 @@ export function ProductPhotoDialog({ open, onOpenChange, product, onSaved }: Pro
         <ProductPhotoEditor
           photos={photos}
           onChange={setPhotos}
-          storageFolder={product ? `catalog/${product.id}` : "catalog"}
+          disabled={saving}
         />
 
         <DialogFooter>

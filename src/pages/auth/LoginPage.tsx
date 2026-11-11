@@ -225,7 +225,7 @@ export function LoginPage({ portal = "customer", initialMode = "signin" }: Login
   const isWideCustomerRegister = portal === "customer" && customerMode === "register" && !registeredReceipt;
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-10">
+    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-3 py-6 sm:px-4 sm:py-10">
       <div className={cn("w-full space-y-6 transition-all", isWideCustomerRegister ? "max-w-lg" : "max-w-md")}>
         <div className="text-center">
           <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -235,7 +235,7 @@ export function LoginPage({ portal = "customer", initialMode = "signin" }: Login
               <Building2 className="h-5 w-5 text-blue-700" />
             )}
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">{branding.agency_name}</h1>
+          <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">{branding.agency_name}</h1>
           <p className="mt-1 text-sm text-slate-500">B2B Supply Operations &amp; Business Ordering Platform</p>
         </div>
 
@@ -343,13 +343,13 @@ export function LoginPage({ portal = "customer", initialMode = "signin" }: Login
                   aria-selected={customerMode === "signin"}
                   onClick={() => switchCustomerMode("signin")}
                   className={cn(
-                    "flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all",
+                    "flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-semibold transition-all sm:px-3",
                     customerMode === "signin"
                       ? "bg-white text-slate-900 shadow-sm"
                       : "text-slate-600 hover:text-slate-900"
                   )}
                 >
-                  <Store className="h-3.5 w-3.5" />
+                  <Store className="h-3.5 w-3.5 shrink-0" />
                   Sign In
                 </button>
                 <button
@@ -358,13 +358,13 @@ export function LoginPage({ portal = "customer", initialMode = "signin" }: Login
                   aria-selected={customerMode === "register"}
                   onClick={() => switchCustomerMode("register")}
                   className={cn(
-                    "flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all",
+                    "flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-semibold transition-all sm:px-3",
                     customerMode === "register"
                       ? "bg-white text-slate-900 shadow-sm"
                       : "text-slate-600 hover:text-slate-900"
                   )}
                 >
-                  <UserPlus className="h-3.5 w-3.5" />
+                  <UserPlus className="h-3.5 w-3.5 shrink-0" />
                   Register Business
                 </button>
               </div>
@@ -405,7 +405,7 @@ export function LoginPage({ portal = "customer", initialMode = "signin" }: Login
                       autoComplete="tel"
                       value={customerIdentifier}
                       onChange={(e) => setCustomerIdentifier(e.target.value)}
-                      placeholder="e.g. 9618401231 or shop@business.in"
+                      placeholder="Phone number or shop@business.in"
                       required
                     />
                     <p className="text-xs text-slate-500">
@@ -447,20 +447,20 @@ export function LoginPage({ portal = "customer", initialMode = "signin" }: Login
                   </div>
 
                   <div className="space-y-1.5 rounded-lg border border-slate-200 bg-slate-50 p-3.5 text-xs text-slate-700">
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500">Status</span>
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="shrink-0 text-slate-500">Status</span>
                       <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-800">
-                        <Clock className="h-3 w-3" />
+                        <Clock className="h-3 w-3 shrink-0" />
                         Pending Admin Approval
                       </span>
                     </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500">Phone</span>
-                      <span className="font-medium text-slate-900">{registeredReceipt.phone}</span>
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="shrink-0 text-slate-500">Phone</span>
+                      <span className="break-all text-right font-medium text-slate-900">{registeredReceipt.phone}</span>
                     </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500">Email</span>
-                      <span className="font-medium text-slate-900">{registeredReceipt.email}</span>
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="shrink-0 text-slate-500">Email</span>
+                      <span className="break-all text-right font-medium text-slate-900">{registeredReceipt.email}</span>
                     </div>
                   </div>
 

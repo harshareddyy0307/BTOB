@@ -3,7 +3,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Trash2, FolderTree, Upload, Loader2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { invalidateCatalogQueries } from "@/lib/productPublishing";
-import { uploadStorageFile } from "@/lib/storage";
+import { getCategoryDescendantIds } from "@/lib/categories";
+import { RASTER_IMAGE_ACCEPT, uploadStorageFile } from "@/lib/storage";
 import { slugify } from "@/lib/utils";
 import type { Category } from "@/types/database";
 import { Button } from "@/components/ui/button";
@@ -48,6 +49,9 @@ export function CategoriesPage() {
   });
 
   const categoryMap = new Map(categories.map((c) => [c.id, c]));
+  const forbiddenParentIds = editing
+    ? new Set<string>([editing.id, ...getCategoryDescendantIds(categories, editing.id)])
+    : new Set<string>();
 
   const openCreate = () => {
     setEditing(null);
@@ -101,8 +105,8 @@ export function CategoriesPage() {
       };
 
       if (editing) {
-        if (payload.parent_id === editing.id) {
-          throw new Error("A category cannot be its own parent.");
+        if (payload.parent_id && forbiddenParentIds.has(payload.parent_id)) {
+          throw new Error("A category cannot be placed under itself or one of its own subcategories.");
         }
         const parentChanged = (editing.parent_id ?? null) !== payload.parent_id;
         const { error } = await supabase.from("categories").update(payload).eq("id", editing.id);
@@ -160,7 +164,7 @@ export function CategoriesPage() {
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Category Management</h1>
+          <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">Category Management</h1>
           <p className="text-sm text-slate-500">
             Organize product categories, subcategories, imagery, and catalog visibility.
           </p>
@@ -185,78 +189,129 @@ export function CategoriesPage() {
           />
         </CardHeader>
         <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Category</TableHead>
-                <TableHead>Parent Category</TableHead>
-                <TableHead>Description</TableHead>
-                <TableHead>Sort</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {isLoading ? (
-                <TableRow>
-                  <TableCell colSpan={6} className="py-8 text-center text-slate-500">
-                    Loading categories...
-                  </TableCell>
-                </TableRow>
-              ) : filtered.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={6} className="py-8 text-center text-slate-500">
-                    No categories found.
-                  </TableCell>
-                </TableRow>
-              ) : (
-                filtered.map((cat) => {
-                  const parent = cat.parent_id ? categoryMap.get(cat.parent_id) : null;
-                  return (
-                    <TableRow key={cat.id}>
-                      <TableCell>
-                        <div className="flex items-center gap-3">
-                          {cat.image_url ? (
-                            <img src={cat.image_url} alt={cat.name} className="h-9 w-9 rounded object-cover border" />
-                          ) : (
-                            <div className="flex h-9 w-9 items-center justify-center rounded border bg-slate-100 text-xs font-semibold text-slate-500">
-                              {cat.name.slice(0, 2).toUpperCase()}
-                            </div>
-                          )}
-                          <div>
-                            <p className="font-medium text-slate-900">{cat.name}</p>
-                            <p className="text-xs text-slate-400">/{cat.slug}</p>
+          <div className="divide-y divide-slate-100 md:hidden">
+            {isLoading ? (
+              <div className="py-8 text-center text-sm text-slate-500">Loading categories...</div>
+            ) : filtered.length === 0 ? (
+              <div className="py-8 text-center text-sm text-slate-500">No categories found.</div>
+            ) : (
+              filtered.map((cat) => {
+                const parent = cat.parent_id ? categoryMap.get(cat.parent_id) : null;
+                return (
+                  <div key={cat.id} className="space-y-2 p-4 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex min-w-0 flex-1 items-center gap-3">
+                        {cat.image_url ? (
+                          <img src={cat.image_url} alt={cat.name} className="h-9 w-9 shrink-0 rounded border object-cover" />
+                        ) : (
+                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded border bg-slate-100 text-xs font-semibold text-slate-500">
+                            {cat.name.slice(0, 2).toUpperCase()}
                           </div>
+                        )}
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-slate-900">{cat.name}</p>
+                          <p className="truncate text-slate-400">
+                            /{cat.slug} &bull; {parent ? `Sub of ${parent.name}` : "Top-level"} &bull; Sort {cat.sort_order}
+                          </p>
                         </div>
-                      </TableCell>
-                      <TableCell className="text-sm text-slate-600">{parent ? parent.name : "Top-level"}</TableCell>
-                      <TableCell className="max-w-xs truncate text-xs text-slate-500">{cat.description || "—"}</TableCell>
-                      <TableCell className="text-xs text-slate-600">{cat.sort_order}</TableCell>
-                      <TableCell>
-                        <StatusBadge status={cat.status} />
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="inline-flex items-center gap-1">
-                          <Button variant="ghost" size="icon" onClick={() => openEdit(cat)} title="Edit">
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleDelete(cat)}
-                            className="text-red-600 hover:text-red-700"
-                            title="Delete"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })
-              )}
-            </TableBody>
-          </Table>
+                      </div>
+                      <StatusBadge status={cat.status} />
+                    </div>
+                    {cat.description && <p className="line-clamp-2 text-slate-600">{cat.description}</p>}
+                    <div className="flex justify-end gap-1 border-t border-slate-100 pt-2">
+                      <Button variant="ghost" size="icon" onClick={() => openEdit(cat)} title="Edit">
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleDelete(cat)}
+                        className="text-red-600 hover:text-red-700"
+                        title="Delete"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Category</TableHead>
+                  <TableHead>Parent Category</TableHead>
+                  <TableHead>Description</TableHead>
+                  <TableHead>Sort</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {isLoading ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="py-8 text-center text-slate-500">
+                      Loading categories...
+                    </TableCell>
+                  </TableRow>
+                ) : filtered.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="py-8 text-center text-slate-500">
+                      No categories found.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  filtered.map((cat) => {
+                    const parent = cat.parent_id ? categoryMap.get(cat.parent_id) : null;
+                    return (
+                      <TableRow key={cat.id}>
+                        <TableCell>
+                          <div className="flex items-center gap-3">
+                            {cat.image_url ? (
+                              <img src={cat.image_url} alt={cat.name} className="h-9 w-9 rounded object-cover border" />
+                            ) : (
+                              <div className="flex h-9 w-9 items-center justify-center rounded border bg-slate-100 text-xs font-semibold text-slate-500">
+                                {cat.name.slice(0, 2).toUpperCase()}
+                              </div>
+                            )}
+                            <div>
+                              <p className="font-medium text-slate-900">{cat.name}</p>
+                              <p className="text-xs text-slate-400">/{cat.slug}</p>
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-sm text-slate-600">{parent ? parent.name : "Top-level"}</TableCell>
+                        <TableCell className="max-w-xs truncate text-xs text-slate-500">{cat.description || "—"}</TableCell>
+                        <TableCell className="text-xs text-slate-600">{cat.sort_order}</TableCell>
+                        <TableCell>
+                          <StatusBadge status={cat.status} />
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="inline-flex items-center gap-1">
+                            <Button variant="ghost" size="icon" onClick={() => openEdit(cat)} title="Edit">
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleDelete(cat)}
+                              className="text-red-600 hover:text-red-700"
+                              title="Delete"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })
+                )}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 
@@ -280,7 +335,7 @@ export function CategoriesPage() {
                   <SelectContent>
                     <SelectItem value="none">Top-level Category</SelectItem>
                     {categories
-                      .filter((c) => c.id !== editing?.id)
+                      .filter((c) => !forbiddenParentIds.has(c.id))
                       .map((c) => (
                         <SelectItem key={c.id} value={c.id}>
                           {c.name}
@@ -317,16 +372,16 @@ export function CategoriesPage() {
 
             <div className="space-y-1.5">
               <Label>Category Image</Label>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
                 <Input
                   value={imageUrl}
                   onChange={(e) => setImageUrl(e.target.value)}
                   placeholder="Image URL or upload file"
                 />
-                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50">
+                <label className="inline-flex shrink-0 cursor-pointer items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50">
                   {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
                   <span>Upload</span>
-                  <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+                  <input type="file" accept={RASTER_IMAGE_ACCEPT} className="hidden" onChange={handleImageUpload} />
                 </label>
               </div>
             </div>

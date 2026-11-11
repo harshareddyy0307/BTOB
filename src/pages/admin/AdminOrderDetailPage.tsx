@@ -13,6 +13,7 @@ import {
   IndianRupee,
   BellRing,
 } from "lucide-react";
+import { exportSingleOrderPdf } from "@/lib/adminPdfExports";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { generateCustomerInvoicePdf } from "@/lib/pdfGenerator";
@@ -49,7 +50,11 @@ import {
 interface DetailedOrderItem extends OrderItemRecord {
   order_item_financials: OrderItemFinancialRecord | OrderItemFinancialRecord[] | null;
   purchase_order_items:
-    | { id: string; purchase_order_id: string; purchase_orders: { id: string; po_number: string } | null }[]
+    | {
+        id: string;
+        purchase_order_id: string;
+        purchase_orders: { id: string; po_number: string; status: string } | null;
+      }[]
     | null;
 }
 
@@ -65,6 +70,7 @@ export function AdminOrderDetailPage() {
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [splitting, setSplitting] = useState(false);
   const [generatingInvoice, setGeneratingInvoice] = useState(false);
+  const [exportingOrderPdf, setExportingOrderPdf] = useState(false);
   const [paymentModal, setPaymentModal] = useState<{
     order: OrderPaymentTarget;
     prefill?: PaymentPrefill | null;
@@ -97,7 +103,7 @@ export function AdminOrderDetailPage() {
       const { data, error } = await supabase
         .from("order_items")
         .select(
-          "*, order_item_financials(*), purchase_order_items(id, purchase_order_id, purchase_orders(id, po_number))"
+          "*, order_item_financials(*), purchase_order_items(id, purchase_order_id, purchase_orders(id, po_number, status))"
         )
         .eq("order_id", id!)
         .order("created_at");
@@ -267,7 +273,10 @@ export function AdminOrderDetailPage() {
       totalGrossMargin += Number(fin.margin_amount_total);
       distinctMfgIds.add(fin.manufacturer_id);
     }
-    if (!it.purchase_order_items || it.purchase_order_items.length === 0) {
+    const hasActivePo = (it.purchase_order_items ?? []).some(
+      (poi) => poi.purchase_orders && poi.purchase_orders.status !== "Cancelled"
+    );
+    if (!hasActivePo) {
       unallocatedCount++;
     }
   });
@@ -288,6 +297,27 @@ export function AdminOrderDetailPage() {
     });
   };
 
+  const handleDownloadOrderDetailPdf = async () => {
+    if (!id || exportingOrderPdf) return;
+    setExportingOrderPdf(true);
+    try {
+      const res = await exportSingleOrderPdf(id);
+      toast({
+        title: "Order Detail PDF downloaded",
+        description: `Exported complete internal sheet for ${res.orderNumber} (${res.lineItemCount} item(s)).`,
+        type: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Could not export Order Detail PDF",
+        description: err instanceof Error ? err.message : "Error",
+        type: "error",
+      });
+    } finally {
+      setExportingOrderPdf(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -296,6 +326,10 @@ export function AdminOrderDetailPage() {
           Back to Order Management
         </Link>
         <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" onClick={handleDownloadOrderDetailPdf} disabled={exportingOrderPdf}>
+            {exportingOrderPdf ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileDown className="h-3.5 w-3.5" />}
+            Download Order Detail PDF
+          </Button>
           <StatusBadge status={order.order_status} />
           <StatusBadge status={order.payment_status} />
           {order.order_status !== "Cancelled" && (
@@ -333,20 +367,20 @@ export function AdminOrderDetailPage() {
       {/* Top Overview + Controls */}
       <div className="grid gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-2">
-          <CardContent className="space-y-5 p-6">
+          <CardContent className="space-y-5 p-4 sm:p-6">
             <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
               <div>
-                <h1 className="text-2xl font-bold text-slate-900">{order.order_number}</h1>
+                <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">{order.order_number}</h1>
                 <p className="mt-1 text-xs text-slate-500">Placed on {formatDateTime(order.placed_at)}</p>
                 <p className="mt-2 text-sm text-slate-700">
                   Customer:{" "}
                   <Link to={`/admin/customers/${order.customer_id}`} className="font-semibold text-blue-700 hover:underline">
                     {order.customers?.business_name}
                   </Link>{" "}
-                  &bull; GSTIN: <span className="font-mono">{order.customers?.gst_number || "Unregistered"}</span>
+                  &bull; GSTIN: <span className="font-mono break-all">{order.customers?.gst_number || "Unregistered"}</span>
                 </p>
               </div>
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-right space-y-1">
+              <div className="space-y-1 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-left sm:text-right">
                 <p className="text-[11px] font-semibold uppercase text-slate-500">Customer Grand Total</p>
                 <p className="text-xl font-bold text-slate-900">{formatCurrency(order.total_amount, sym)}</p>
                 <p className="text-xs font-medium text-slate-600">
@@ -434,7 +468,7 @@ export function AdminOrderDetailPage() {
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <CardTitle className="flex items-center gap-2">
-              <Factory className="h-4 w-4 text-blue-700" />
+              <Factory className="h-4 w-4 shrink-0 text-blue-700" />
               Ordered Products &amp; Manufacturer Allocation ({items.length})
             </CardTitle>
             <CardDescription>
@@ -442,6 +476,7 @@ export function AdminOrderDetailPage() {
             </CardDescription>
           </div>
           <Button
+            className="h-auto min-h-9 w-full whitespace-normal py-2 text-center sm:w-auto"
             onClick={handleSplitToPurchaseOrders}
             disabled={splitting || unallocatedCount === 0 || order.order_status === "Cancelled"}
           >
@@ -452,79 +487,184 @@ export function AdminOrderDetailPage() {
           </Button>
         </CardHeader>
         <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Product / SKU</TableHead>
-                <TableHead>Manufacturer (Admin)</TableHead>
-                <TableHead>Qty</TableHead>
-                <TableHead>Mfg Price</TableHead>
-                <TableHead>Margin</TableHead>
-                <TableHead>Cust. Selling</TableHead>
-                <TableHead>GST</TableHead>
-                <TableHead>Line Total</TableHead>
-                <TableHead>Linked PO</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {items.map((item) => {
-                const fin = Array.isArray(item.order_item_financials)
-                  ? item.order_item_financials[0]
-                  : item.order_item_financials;
-                const linkedPoi = item.purchase_order_items?.[0];
+          <div className="divide-y divide-slate-100 md:hidden">
+            {items.map((item) => {
+              const fin = Array.isArray(item.order_item_financials)
+                ? item.order_item_financials[0]
+                : item.order_item_financials;
+              const linkedPoi = (item.purchase_order_items ?? []).find(
+                (poi) => poi.purchase_orders && poi.purchase_orders.status !== "Cancelled"
+              );
+              const cancelledPoi = (item.purchase_order_items ?? []).find(
+                (poi) => poi.purchase_orders && poi.purchase_orders.status === "Cancelled"
+              );
 
-                return (
-                  <TableRow key={item.id}>
-                    <TableCell>
-                      <p className="font-medium text-slate-900">{item.product_name_snapshot}</p>
-                      <p className="font-mono text-xs text-slate-500">{item.sku_snapshot}</p>
-                    </TableCell>
-                    <TableCell>
+              return (
+                <div key={item.id} className="space-y-2.5 p-4 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-900">{item.product_name_snapshot}</p>
+                      <p className="font-mono text-slate-500">{item.sku_snapshot}</p>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <p className="font-bold text-slate-900">{formatCurrency(item.line_total, sym)}</p>
+                      <p className="text-[11px] text-slate-500">GST {item.gst_rate}%</p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 rounded-md border border-slate-100 bg-slate-50 p-2.5">
+                    <div>
+                      <span className="text-slate-500">Qty: </span>
+                      <strong className="text-slate-900">
+                        {formatQty(item.quantity)} {item.unit_snapshot}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="text-slate-500">Selling: </span>
+                      <strong className="text-slate-900">{formatCurrency(item.unit_selling_price, sym)}</strong>
+                    </div>
+                    <div>
+                      <span className="text-slate-500">Mfg Cost: </span>
+                      <strong className="text-slate-800">
+                        {fin ? formatCurrency(fin.unit_manufacturer_price, sym) : "—"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="text-slate-500">Margin: </span>
+                      <strong className={fin && Number(fin.margin_amount_total) < 0 ? "text-red-700" : "text-emerald-700"}>
+                        {fin ? `${fin.margin_percentage_snapshot}% (${formatSignedCurrency(fin.margin_amount_total, sym)})` : "—"}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
                       {fin ? (
                         <Link
                           to={`/admin/manufacturers/${fin.manufacturer_id}`}
-                          className="text-xs font-semibold text-blue-700 hover:underline"
+                          className="font-semibold text-blue-700 hover:underline"
                         >
                           {fin.manufacturer_name_snapshot}
                         </Link>
                       ) : (
-                        "—"
+                        <span className="text-slate-400">No Manufacturer</span>
                       )}
-                    </TableCell>
-                    <TableCell className="text-xs font-medium">
-                      {formatQty(item.quantity)} {item.unit_snapshot}
-                    </TableCell>
-                    <TableCell className="text-xs text-slate-700">
-                      {fin ? formatCurrency(fin.unit_manufacturer_price, sym) : "—"}
-                    </TableCell>
-                    <TableCell
-                      className={cn(
-                        "text-xs font-medium",
-                        fin && Number(fin.margin_amount_total) < 0 ? "text-red-700" : "text-emerald-700"
-                      )}
-                    >
-                      {fin ? `${fin.margin_percentage_snapshot}% (${formatSignedCurrency(fin.margin_amount_total, sym)})` : "—"}
-                    </TableCell>
-                    <TableCell className="font-medium">{formatCurrency(item.unit_selling_price, sym)}</TableCell>
-                    <TableCell className="text-xs text-slate-500">{item.gst_rate}%</TableCell>
-                    <TableCell className="font-semibold text-slate-900">{formatCurrency(item.line_total, sym)}</TableCell>
-                    <TableCell>
+                    </div>
+                    <div>
                       {linkedPoi?.purchase_orders ? (
                         <Link
                           to={`/admin/purchase-orders/${linkedPoi.purchase_orders.id}`}
-                          className="font-mono text-xs font-semibold text-blue-700 hover:underline"
+                          className="font-mono font-semibold text-blue-700 hover:underline"
                         >
                           {linkedPoi.purchase_orders.po_number}
                         </Link>
+                      ) : cancelledPoi?.purchase_orders ? (
+                        <Link
+                          to={`/admin/purchase-orders/${cancelledPoi.purchase_orders.id}`}
+                          className="font-mono text-[11px] text-amber-700 hover:underline"
+                        >
+                          Unassigned ({cancelledPoi.purchase_orders.po_number} cancelled)
+                        </Link>
                       ) : (
-                        <span className="text-xs text-amber-700">Unassigned</span>
+                        <span className="font-medium text-amber-700">PO Unassigned</span>
                       )}
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Product / SKU</TableHead>
+                  <TableHead>Manufacturer (Admin)</TableHead>
+                  <TableHead>Qty</TableHead>
+                  <TableHead>Mfg Price</TableHead>
+                  <TableHead>Margin</TableHead>
+                  <TableHead>Cust. Selling</TableHead>
+                  <TableHead>GST</TableHead>
+                  <TableHead>Line Total</TableHead>
+                  <TableHead>Linked PO</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {items.map((item) => {
+                  const fin = Array.isArray(item.order_item_financials)
+                    ? item.order_item_financials[0]
+                    : item.order_item_financials;
+                  const linkedPoi = (item.purchase_order_items ?? []).find(
+                    (poi) => poi.purchase_orders && poi.purchase_orders.status !== "Cancelled"
+                  );
+                  const cancelledPoi = (item.purchase_order_items ?? []).find(
+                    (poi) => poi.purchase_orders && poi.purchase_orders.status === "Cancelled"
+                  );
+
+                  return (
+                    <TableRow key={item.id}>
+                      <TableCell>
+                        <p className="font-medium text-slate-900">{item.product_name_snapshot}</p>
+                        <p className="font-mono text-xs text-slate-500">{item.sku_snapshot}</p>
+                      </TableCell>
+                      <TableCell>
+                        {fin ? (
+                          <Link
+                            to={`/admin/manufacturers/${fin.manufacturer_id}`}
+                            className="text-xs font-semibold text-blue-700 hover:underline"
+                          >
+                            {fin.manufacturer_name_snapshot}
+                          </Link>
+                        ) : (
+                          "—"
+                        )}
+                      </TableCell>
+                      <TableCell className="text-xs font-medium">
+                        {formatQty(item.quantity)} {item.unit_snapshot}
+                      </TableCell>
+                      <TableCell className="text-xs text-slate-700">
+                        {fin ? formatCurrency(fin.unit_manufacturer_price, sym) : "—"}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-xs font-medium",
+                          fin && Number(fin.margin_amount_total) < 0 ? "text-red-700" : "text-emerald-700"
+                        )}
+                      >
+                        {fin ? `${fin.margin_percentage_snapshot}% (${formatSignedCurrency(fin.margin_amount_total, sym)})` : "—"}
+                      </TableCell>
+                      <TableCell className="font-medium">{formatCurrency(item.unit_selling_price, sym)}</TableCell>
+                      <TableCell className="text-xs text-slate-500">{item.gst_rate}%</TableCell>
+                      <TableCell className="font-semibold text-slate-900">{formatCurrency(item.line_total, sym)}</TableCell>
+                      <TableCell>
+                        {linkedPoi?.purchase_orders ? (
+                          <Link
+                            to={`/admin/purchase-orders/${linkedPoi.purchase_orders.id}`}
+                            className="font-mono text-xs font-semibold text-blue-700 hover:underline"
+                          >
+                            {linkedPoi.purchase_orders.po_number}
+                          </Link>
+                        ) : cancelledPoi?.purchase_orders ? (
+                          <div className="space-y-0.5">
+                            <span className="block text-xs font-medium text-amber-700">Unassigned (PO Cancelled)</span>
+                            <Link
+                              to={`/admin/purchase-orders/${cancelledPoi.purchase_orders.id}`}
+                              className="font-mono text-[11px] text-slate-400 line-through hover:text-slate-600"
+                            >
+                              {cancelledPoi.purchase_orders.po_number}
+                            </Link>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-amber-700">Unassigned</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 
@@ -548,14 +688,14 @@ export function AdminOrderDetailPage() {
             ) : (
               <div className="divide-y divide-slate-100">
                 {linkedPos.map((po) => (
-                  <div key={po.id} className="flex items-center justify-between py-3">
-                    <div>
+                  <div key={po.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
                       <Link to={`/admin/purchase-orders/${po.id}`} className="font-semibold text-blue-700 hover:underline">
                         {po.po_number}
                       </Link>
                       <p className="text-xs text-slate-500">{po.manufacturers?.company_name}</p>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center justify-between gap-3 sm:justify-end">
                       <StatusBadge status={po.status} />
                       <span className="text-sm font-semibold">{formatCurrency(po.total_amount, sym)}</span>
                     </div>
@@ -567,10 +707,10 @@ export function AdminOrderDetailPage() {
         </Card>
 
         <Card>
-          <CardHeader className="flex flex-row items-start justify-between gap-2">
+          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <CardTitle className="flex items-center gap-2 text-base">
-                <ReceiptIndianRupee className="h-4 w-4 text-blue-700" />
+                <ReceiptIndianRupee className="h-4 w-4 shrink-0 text-blue-700" />
                 Order Payments &amp; GST Invoice
               </CardTitle>
               <CardDescription>
@@ -585,7 +725,7 @@ export function AdminOrderDetailPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             {/* Live Order Payment Due Box */}
-            <div className="grid grid-cols-3 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
+            <div className="grid grid-cols-1 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs sm:grid-cols-3">
               <div>
                 <p className="text-slate-500">Order Total</p>
                 <p className="mt-0.5 text-sm font-bold text-slate-900">{formatCurrency(order.total_amount, sym)}</p>
@@ -604,17 +744,17 @@ export function AdminOrderDetailPage() {
 
             {invoice ? (
               <div className="space-y-3 rounded-lg border border-slate-200 bg-white p-4 text-sm">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <p className="text-base font-bold text-slate-900">{invoice.invoice_number}</p>
                     <p className="text-xs text-slate-500">
                       Issued {formatDate(invoice.invoice_date)} &bull; Due {formatDate(invoice.due_date)}
                     </p>
                   </div>
-                  <StatusBadge status={invoice.payment_status} />
+                  <StatusBadge status={order.order_status === "Cancelled" ? "cancelled" : invoice.payment_status} />
                 </div>
 
-                <div className="grid grid-cols-2 gap-2 pt-1 text-xs text-slate-700">
+                <div className="grid grid-cols-1 gap-1.5 pt-1 text-xs text-slate-700 sm:grid-cols-2 sm:gap-2">
                   <p>Taxable Subtotal: {formatCurrency(invoice.subtotal, sym)}</p>
                   <p>
                     {invoice.is_inter_state
@@ -624,24 +764,30 @@ export function AdminOrderDetailPage() {
                 </div>
 
                 <div className="flex flex-wrap gap-2 pt-1">
-                  {agency && order.customers && (
-                    <Button
-                      size="sm"
-                      onClick={() =>
-                        generateCustomerInvoicePdf({
-                          agency,
-                          invoice,
-                          customer: order.customers,
-                          order,
-                          items,
-                          payments: activePayments,
-                        })
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      if (!agency || !order.customers) {
+                        toast({
+                          title: "Cannot generate Invoice PDF",
+                          description: "Agency or customer profile is still loading.",
+                          type: "error",
+                        });
+                        return;
                       }
-                    >
-                      <FileDown className="h-4 w-4" />
-                      Download Invoice PDF
-                    </Button>
-                  )}
+                      generateCustomerInvoicePdf({
+                        agency,
+                        invoice,
+                        customer: order.customers,
+                        order,
+                        items,
+                        payments: activePayments,
+                      });
+                    }}
+                  >
+                    <FileDown className="h-4 w-4" />
+                    Download Invoice PDF
+                  </Button>
                   <Link to="/admin/invoices">
                     <Button size="sm" variant="outline">
                       Open All Invoices
@@ -650,7 +796,7 @@ export function AdminOrderDetailPage() {
                 </div>
               </div>
             ) : (
-              <div className="space-y-3 rounded-lg border border-dashed border-slate-200 py-4 text-center">
+              <div className="space-y-3 rounded-lg border border-dashed border-slate-200 px-3 py-4 text-center">
                 <p className="text-xs text-slate-500">
                   No tax invoice generated yet. Recording a payment will auto-generate the GST invoice, or issue one manually:
                 </p>
@@ -672,11 +818,11 @@ export function AdminOrderDetailPage() {
                     <div
                       key={p.id}
                       className={cn(
-                        "flex items-center justify-between px-3 py-2 text-xs",
+                        "flex items-center justify-between gap-2 px-3 py-2 text-xs",
                         p.status === "voided" && "bg-slate-50 opacity-60 line-through"
                       )}
                     >
-                      <div>
+                      <div className="min-w-0">
                         <p className="font-medium text-slate-900">
                           {p.payment_method} {p.reference_number ? `(${p.reference_number})` : ""}
                         </p>
@@ -685,7 +831,7 @@ export function AdminOrderDetailPage() {
                           {p.notes ? ` • ${p.notes}` : ""}
                         </p>
                       </div>
-                      <span className="font-semibold text-emerald-700">
+                      <span className="shrink-0 font-semibold text-emerald-700">
                         {p.status === "voided" ? "Voided" : formatCurrency(p.amount, sym)}
                       </span>
                     </div>

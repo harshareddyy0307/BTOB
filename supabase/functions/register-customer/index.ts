@@ -7,19 +7,29 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-function jsonResponse(body: unknown, status = 200) {
+const EMAIL_RE = /^[^\s@%]+@[^\s@%]+\.[^\s@%]{2,}$/;
+
+function jsonResponse(body: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...corsHeaders, "Content-Type": "application/json", ...extraHeaders },
   });
+}
+
+function getClientIp(req: Request): string {
+  const cfIp = req.headers.get("cf-connecting-ip")?.trim();
+  if (cfIp) return cfIp;
+  const xff = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  if (xff) return xff;
+  return req.headers.get("x-real-ip")?.trim() || "unknown";
 }
 
 function canonicalPhone(raw: string): string {
   const digits = raw.replace(/\D/g, "");
   if (!digits) return "";
-  if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1);
-  if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
   if (digits.length === 13 && digits.startsWith("091")) return digits.slice(3);
+  if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
+  if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1);
   return digits;
 }
 
@@ -27,8 +37,6 @@ function generateInternalSecret(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -40,7 +48,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const body = await req.json();
+    const body = await req.json().catch(() => null);
 
     const business_name = String(body?.business_name ?? "").trim();
     const owner_name = String(body?.owner_name ?? "").trim();
@@ -65,7 +73,7 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Enter a valid phone number." }, 400);
     }
 
-    if (!email || email.length > 160 || !EMAIL_RE.test(email)) {
+    if (!email || email.length > 160 || !EMAIL_RE.test(email) || /[\r\n\t]/.test(email)) {
       return jsonResponse({ error: "Enter a valid business email address." }, 400);
     }
 
@@ -80,11 +88,29 @@ Deno.serve(async (req: Request) => {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
+    // Rate limit registrations by network IP and email
+    const clientIp = getClientIp(req);
+    const { data: ipRl } = await adminClient.rpc("check_auth_rate_limit", {
+      p_bucket: "register-customer-ip",
+      p_key: clientIp,
+      p_max_attempts: 10,
+      p_window_seconds: 900,
+    });
+    const ipLimit = Array.isArray(ipRl) ? ipRl[0] : ipRl;
+    if (ipLimit && ipLimit.allowed === false) {
+      const waitSec = Number(ipLimit.retry_after_seconds || 60);
+      return jsonResponse(
+        { error: `Too many registration requests from this network. Try again in ${waitSec}s.` },
+        429,
+        { "Retry-After": String(waitSec) }
+      );
+    }
+
     // 1. Check duplicate customer email
     const { data: existingEmailCustomer, error: emailLookupErr } = await adminClient
       .from("customers")
-      .select("id, status, business_name")
-      .ilike("email", email)
+      .select("id, status")
+      .eq("email", email)
       .maybeSingle();
 
     if (emailLookupErr) {
@@ -117,7 +143,7 @@ Deno.serve(async (req: Request) => {
     const { data: existingUserEmail, error: userLookupErr } = await adminClient
       .from("users")
       .select("id")
-      .ilike("email", email)
+      .eq("email", email)
       .maybeSingle();
 
     if (userLookupErr) {
@@ -130,16 +156,17 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // 3. Check duplicate phone across customers
-    const { data: existingCustomers, error: phoneLookupErr } = await adminClient
-      .from("customers")
-      .select("id, status, phone");
+    // 3. Check duplicate canonical phone across customers
+    const { data: phoneMatches, error: phoneLookupErr } = await adminClient.rpc(
+      "find_customers_by_canonical_phone",
+      { p_phone: cleanPhone }
+    );
 
     if (phoneLookupErr) {
       return jsonResponse({ error: phoneLookupErr.message }, 500);
     }
 
-    const phoneMatch = (existingCustomers ?? []).find((c) => canonicalPhone(c.phone || "") === cleanPhone);
+    const phoneMatch = Array.isArray(phoneMatches) ? phoneMatches[0] : null;
     if (phoneMatch) {
       if (phoneMatch.status === "pending") {
         return jsonResponse(
@@ -211,7 +238,8 @@ Deno.serve(async (req: Request) => {
 
     if (userInsertErr) {
       await adminClient.auth.admin.deleteUser(newUserId);
-      return jsonResponse({ error: userInsertErr.message }, 400);
+      const statusCode = userInsertErr.code === "23505" ? 409 : 400;
+      return jsonResponse({ error: userInsertErr.message }, statusCode);
     }
 
     const { data: customer, error: custErr } = await adminClient
@@ -236,7 +264,12 @@ Deno.serve(async (req: Request) => {
     if (custErr || !customer) {
       await adminClient.from("users").delete().eq("id", newUserId);
       await adminClient.auth.admin.deleteUser(newUserId);
-      return jsonResponse({ error: custErr?.message || "Failed to create pending business registration" }, 400);
+      const statusCode = custErr?.code === "23505" ? 409 : 400;
+      const friendlyErr =
+        custErr?.code === "23505"
+          ? "A business account with this email or phone number already exists."
+          : custErr?.message || "Failed to create pending business registration";
+      return jsonResponse({ error: friendlyErr }, statusCode);
     }
 
     await adminClient.from("customer_addresses").insert({

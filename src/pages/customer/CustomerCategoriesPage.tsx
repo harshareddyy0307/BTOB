@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, LayoutGrid } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { supabase, fetchAllRows } from "@/lib/supabase";
+import { getCategoryAndDescendantIds } from "@/lib/categories";
 import { useAuth } from "@/contexts/AuthContext";
 import type { Category, CustomerCatalogProduct } from "@/types/database";
 import { Card, CardContent } from "@/components/ui/card";
@@ -25,20 +26,20 @@ export function CustomerCategoriesPage() {
   });
 
   const activeCategory = categories.find((c) => c.id === id) || null;
-  const subCategoryIds = id ? categories.filter((c) => c.parent_id === id).map((c) => c.id) : [];
+  const targetCategoryIds = id ? getCategoryAndDescendantIds(categories, id) : [];
 
   const { data: products = [], isLoading: loadingProds } = useQuery({
-    queryKey: ["customer-category-products", id, subCategoryIds.join(","), customerProfile?.id],
-    enabled: Boolean(id && customerProfile?.id),
-    queryFn: async () => {
-      const targetIds = [id!, ...subCategoryIds];
-      const { data } = await supabase
-        .from("v_customer_catalog")
-        .select("*")
-        .in("category_id", targetIds)
-        .order("name");
-      return (data ?? []) as CustomerCatalogProduct[];
-    },
+    queryKey: ["customer-category-products", id, targetCategoryIds.join(","), customerProfile?.id],
+    enabled: Boolean(id && customerProfile?.id && targetCategoryIds.length > 0),
+    queryFn: async () =>
+      fetchAllRows<CustomerCatalogProduct>((from, to) =>
+        supabase
+          .from("v_customer_catalog")
+          .select("*")
+          .in("category_id", targetCategoryIds)
+          .order("name")
+          .range(from, to)
+      ),
   });
 
   if (id) {
@@ -51,7 +52,7 @@ export function CustomerCategoriesPage() {
               <ArrowLeft className="h-3.5 w-3.5" />
               All Categories
             </Link>
-            <h1 className="mt-1 text-2xl font-bold text-slate-900">{activeCategory?.name || "Category Catalog"}</h1>
+            <h1 className="mt-1 text-xl font-bold text-slate-900 sm:text-2xl">{activeCategory?.name || "Category Catalog"}</h1>
             {activeCategory?.description && <p className="text-sm text-slate-500">{activeCategory.description}</p>}
           </div>
         </div>
@@ -92,7 +93,7 @@ export function CustomerCategoriesPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="flex items-center gap-2 text-2xl font-bold text-slate-900">
+        <h1 className="flex items-center gap-2 text-xl font-bold text-slate-900 sm:text-2xl">
           <LayoutGrid className="h-5 w-5 text-blue-700" />
           Browse Product Categories
         </h1>
@@ -103,27 +104,49 @@ export function CustomerCategoriesPage() {
         <div className="py-12 text-center text-sm text-slate-500">Loading categories...</div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {categories.map((cat) => (
-            <Link key={cat.id} to={`/customer/categories/${cat.id}`}>
-              <Card className="h-full transition-colors hover:border-blue-400">
-                <CardContent className="flex items-start gap-4 p-5">
-                  {cat.image_url ? (
-                    <img src={cat.image_url} alt={cat.name} className="h-14 w-14 rounded-md border object-cover" />
-                  ) : (
-                    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md border bg-slate-100 text-sm font-bold text-slate-600">
-                      {cat.name.slice(0, 2).toUpperCase()}
-                    </div>
-                  )}
-                  <div>
-                    <h3 className="font-semibold text-slate-900">{cat.name}</h3>
-                    <p className="mt-1 line-clamp-2 text-xs text-slate-500">
-                      {cat.description || "Browse wholesale products in this category."}
-                    </p>
-                  </div>
-                </CardContent>
-              </Card>
-            </Link>
-          ))}
+          {categories
+            .filter((cat) => !cat.parent_id || !categories.some((p) => p.id === cat.parent_id))
+            .map((cat) => {
+              const children = categories.filter((c) => c.parent_id === cat.id);
+              return (
+                <Link key={cat.id} to={`/customer/categories/${cat.id}`}>
+                  <Card className="h-full transition-colors hover:border-blue-400">
+                    <CardContent className="flex items-start gap-3 p-4 sm:gap-4 sm:p-5">
+                      {cat.image_url ? (
+                        <img src={cat.image_url} alt={cat.name} className="h-12 w-12 shrink-0 rounded-md border object-cover sm:h-14 sm:w-14" />
+                      ) : (
+                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border bg-slate-100 text-sm font-bold text-slate-600 sm:h-14 sm:w-14">
+                          {cat.name.slice(0, 2).toUpperCase()}
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <h3 className="font-semibold text-slate-900">{cat.name}</h3>
+                        <p className="mt-1 line-clamp-2 text-xs text-slate-500">
+                          {cat.description || "Browse wholesale products in this category."}
+                        </p>
+                        {children.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {children.slice(0, 3).map((sub) => (
+                              <span
+                                key={sub.id}
+                                className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600"
+                              >
+                                {sub.name}
+                              </span>
+                            ))}
+                            {children.length > 3 && (
+                              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+                                +{children.length - 3} more
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </Link>
+              );
+            })}
         </div>
       )}
     </div>

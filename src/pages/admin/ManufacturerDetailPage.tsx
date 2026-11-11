@@ -19,8 +19,10 @@ import {
   Percent,
   Camera,
   RefreshCw,
+  FileDown,
 } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { exportSingleManufacturerPdf } from "@/lib/adminPdfExports";
+import { fetchAllRows, supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   bulkPublishProducts,
@@ -28,8 +30,9 @@ import {
   bulkUpdatePublishedPrices,
   invalidateCatalogQueries,
 } from "@/lib/productPublishing";
+import { getCategoryAndDescendantIds } from "@/lib/categories";
 import { isPublishedWithPendingPrice } from "@/lib/pricing";
-import { getManufacturerAssetSignedUrl, uploadStorageFile } from "@/lib/storage";
+import { RASTER_IMAGE_ACCEPT, getManufacturerAssetSignedUrl, uploadStorageFile } from "@/lib/storage";
 import { formatCurrency, formatQty } from "@/lib/utils";
 import type { AdminProduct, Category, Manufacturer } from "@/types/database";
 import { Button } from "@/components/ui/button";
@@ -46,7 +49,8 @@ import { useToast } from "@/components/ui/toast";
 
 export function ManufacturerDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { userProfile } = useAuth();
+  const { userProfile, branding } = useAuth();
+  const sym = branding.currency_symbol || "₹";
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -70,6 +74,7 @@ export function ManufacturerDetailPage() {
   // Bulk Excel Import Dialog
   const [importOpen, setImportOpen] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
 
   const { data: manufacturer, isLoading: loadingMfg } = useQuery({
     queryKey: ["admin-manufacturer", id],
@@ -99,13 +104,15 @@ export function ManufacturerDetailPage() {
     queryKey: ["admin-manufacturer-products", id],
     enabled: Boolean(id),
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("products")
-        .select("*, category:categories(id, name, slug), product_images(*), product_prices(*), inventory(*)")
-        .eq("manufacturer_id", id!)
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as unknown as AdminProduct[];
+      return await fetchAllRows<AdminProduct>((from, to) =>
+        supabase
+          .from("products")
+          .select("*, category:categories(id, name, slug), product_images(*), product_prices(*), inventory(*)")
+          .eq("manufacturer_id", id!)
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to)
+      );
     },
   });
 
@@ -215,53 +222,175 @@ export function ManufacturerDetailPage() {
       if (rows.length === 0) throw new Error("Spreadsheet has no rows.");
 
       const catByName = new Map(categories.map((c) => [c.name.toLowerCase().trim(), c.id]));
-      let importedCount = 0;
+      const candidateSkus = Array.from(
+        new Set(
+          rows
+            .map((r) => String(r.sku || "").trim().toUpperCase())
+            .filter(Boolean)
+        )
+      );
 
-      for (const r of rows) {
-        const prodName = String(r.name || "").trim();
-        const prodSku = String(r.sku || "").trim().toUpperCase();
-        if (!prodName || !prodSku) continue;
+      const existingBySku = new Map<
+        string,
+        { id: string; manufacturer_id: string; available_quantity: number; low_stock_threshold: number }
+      >();
 
-        const catKey = String(r.category_name || "").toLowerCase().trim();
-        const resolvedCatId = catByName.get(catKey) || categories[0]?.id;
-        if (!resolvedCatId) continue;
-
-        const { data: created, error } = await supabase
+      for (let i = 0; i < candidateSkus.length; i += 200) {
+        const chunk = candidateSkus.slice(i, i + 200);
+        const { data: existingRows, error: lookupErr } = await supabase
           .from("products")
-          .upsert(
-            {
-              manufacturer_id: id,
-              category_id: resolvedCatId,
-              name: prodName,
-              sku: prodSku,
-              description: r.description ? String(r.description) : null,
-              unit_of_measurement: String(r.unit_of_measurement || "pcs"),
-              min_order_quantity: Number(r.min_order_quantity) || 1,
-              hsn_code: r.hsn_code ? String(r.hsn_code) : null,
-              gst_rate: Number(r.gst_rate ?? 18),
-              status: "active",
-            },
-            { onConflict: "sku" }
-          )
-          .select("id")
-          .single();
+          .select("id, sku, manufacturer_id, inventory(available_quantity, low_stock_threshold)")
+          .in("sku", chunk);
+        if (lookupErr) throw lookupErr;
+        for (const row of existingRows ?? []) {
+          const inv = Array.isArray(row.inventory) ? row.inventory[0] : row.inventory;
+          existingBySku.set(String(row.sku).toUpperCase(), {
+            id: row.id,
+            manufacturer_id: row.manufacturer_id,
+            available_quantity: Number(inv?.available_quantity ?? 0),
+            low_stock_threshold: Number(inv?.low_stock_threshold ?? 10),
+          });
+        }
+      }
 
-        if (error || !created) continue;
+      let importedCount = 0;
+      const skippedReasons: string[] = [];
 
-        const stockQty = Math.max(0, Number(r.available_quantity) || 0);
-        const { error: invErr } = await supabase.from("inventory").upsert(
-          {
-            product_id: created.id,
+      for (let idx = 0; idx < rows.length; idx++) {
+        const r = rows[idx];
+        const rowLabel = `Row ${idx + 2}`;
+        const prodName = String(r.name ?? "").trim();
+        const prodSku = String(r.sku ?? "").trim().toUpperCase();
+        if (!prodName || !prodSku) {
+          skippedReasons.push(`${rowLabel}: missing name or SKU`);
+          continue;
+        }
+
+        const existing = existingBySku.get(prodSku);
+        if (existing && existing.manufacturer_id !== id) {
+          skippedReasons.push(`${rowLabel} (${prodSku}): SKU belongs to another manufacturer`);
+          continue;
+        }
+
+        const catKey = String(r.category_name ?? "").toLowerCase().trim();
+        const matchedCatId = catKey ? catByName.get(catKey) : undefined;
+        if (catKey && !matchedCatId) {
+          skippedReasons.push(`${rowLabel} (${prodSku}): unknown category "${String(r.category_name).trim()}"`);
+          continue;
+        }
+        const resolvedCatId = matchedCatId || categories[0]?.id;
+        if (!resolvedCatId) {
+          skippedReasons.push(`${rowLabel} (${prodSku}): no category available`);
+          continue;
+        }
+
+        const rawMfgPrice = r.manufacturer_price;
+        const mfgPriceNum =
+          rawMfgPrice === undefined || rawMfgPrice === null || String(rawMfgPrice).trim() === ""
+            ? 0
+            : Number(rawMfgPrice);
+        if (!Number.isFinite(mfgPriceNum) || mfgPriceNum < 0) {
+          skippedReasons.push(`${rowLabel} (${prodSku}): invalid manufacturer_price`);
+          continue;
+        }
+
+        const rawStock = r.available_quantity;
+        const stockQty =
+          rawStock === undefined || rawStock === null || String(rawStock).trim() === ""
+            ? 0
+            : Number(rawStock);
+        if (!Number.isFinite(stockQty) || stockQty < 0) {
+          skippedReasons.push(`${rowLabel} (${prodSku}): invalid available_quantity`);
+          continue;
+        }
+
+        const rawMoq = r.min_order_quantity;
+        const moqVal =
+          rawMoq === undefined || rawMoq === null || String(rawMoq).trim() === "" ? 1 : Number(rawMoq);
+        if (!Number.isFinite(moqVal) || moqVal <= 0) {
+          skippedReasons.push(`${rowLabel} (${prodSku}): min_order_quantity must be > 0`);
+          continue;
+        }
+
+        const rawGst = r.gst_rate;
+        const gstVal =
+          rawGst === undefined || rawGst === null || String(rawGst).trim() === "" ? 18 : Number(rawGst);
+        if (!Number.isFinite(gstVal) || gstVal < 0 || gstVal > 100) {
+          skippedReasons.push(`${rowLabel} (${prodSku}): gst_rate must be 0-100`);
+          continue;
+        }
+
+        const basePayload = {
+          manufacturer_id: id,
+          category_id: resolvedCatId,
+          name: prodName,
+          sku: prodSku,
+          description: r.description ? String(r.description).trim() || null : null,
+          unit_of_measurement: String(r.unit_of_measurement || "pcs").trim() || "pcs",
+          min_order_quantity: moqVal,
+          hsn_code: r.hsn_code ? String(r.hsn_code).trim() || null : null,
+          gst_rate: gstVal,
+          status: "active" as const,
+        };
+
+        let targetId: string;
+        if (existing) {
+          const { error: updErr } = await supabase.from("products").update(basePayload).eq("id", existing.id);
+          if (updErr) {
+            skippedReasons.push(`${rowLabel} (${prodSku}): ${updErr.message}`);
+            continue;
+          }
+          targetId = existing.id;
+
+          const delta = Math.round((stockQty - existing.available_quantity) * 100) / 100;
+          const { error: invErr } = await supabase.rpc("adjust_product_stock_and_threshold_admin", {
+            p_product_id: targetId,
+            p_quantity_delta: delta,
+            p_low_stock_threshold: existing.low_stock_threshold,
+            p_movement_type: "adjustment",
+            p_notes: "Updated via Excel bulk import",
+          });
+          if (invErr) throw invErr;
+        } else {
+          const { data: created, error: insErr } = await supabase
+            .from("products")
+            .insert(basePayload)
+            .select("id")
+            .single();
+          if (insErr || !created) {
+            skippedReasons.push(`${rowLabel} (${prodSku}): ${insErr?.message || "Insert failed"}`);
+            continue;
+          }
+          targetId = created.id;
+
+          const { error: invErr } = await supabase.from("inventory").insert({
+            product_id: targetId,
             available_quantity: stockQty,
             low_stock_threshold: 10,
-          },
-          { onConflict: "product_id" }
-        );
-        if (invErr) throw invErr;
+          });
+          if (invErr) throw invErr;
+          if (stockQty > 0) {
+            const { error: movErr } = await supabase.from("inventory_movements").insert({
+              product_id: targetId,
+              movement_type: "restock",
+              quantity_delta: stockQty,
+              balance_after: stockQty,
+              reference_type: "excel_import",
+              notes: "Initial stock imported via Excel",
+            });
+            if (movErr) throw movErr;
+          }
+          existingBySku.set(prodSku, {
+            id: targetId,
+            manufacturer_id: id,
+            available_quantity: stockQty,
+            low_stock_threshold: 10,
+          });
+        }
 
         const { error: priceErr } = await supabase.rpc("recalculate_product_draft_price", {
-          p_product_id: created.id,
-          p_new_manufacturer_price: Math.max(0, Number(r.manufacturer_price) || 0),
+          p_product_id: targetId,
+          p_new_manufacturer_price: Math.round(mfgPriceNum * 100) / 100,
           p_notes: "Imported from Excel sheet",
         });
         if (priceErr) throw priceErr;
@@ -269,13 +398,29 @@ export function ManufacturerDetailPage() {
         importedCount++;
       }
 
-      toast({ title: `Imported ${importedCount} product(s)`, type: "success" });
+      if (importedCount === 0 && skippedReasons.length > 0) {
+        throw new Error(skippedReasons.slice(0, 3).join("; "));
+      }
+
+      toast({
+        title: `Imported ${importedCount} product(s)`,
+        description:
+          skippedReasons.length > 0
+            ? `Skipped ${skippedReasons.length} row(s): ${skippedReasons.slice(0, 2).join("; ")}`
+            : undefined,
+        type: skippedReasons.length > 0 ? "info" : "success",
+      });
       setImportOpen(false);
-      await invalidateCatalogQueries(queryClient);
+      await Promise.all([
+        invalidateCatalogQueries(queryClient),
+        queryClient.invalidateQueries({ queryKey: ["admin-inventory"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-inventory-movements"] }),
+      ]);
     } catch (err) {
       toast({ title: "Import failed", description: err instanceof Error ? err.message : "Invalid file", type: "error" });
     } finally {
       setImporting(false);
+      e.target.value = "";
     }
   };
 
@@ -283,7 +428,7 @@ export function ManufacturerDetailPage() {
     try {
       if (!p.is_published) {
         if (Number(p.product_prices?.draft_selling_price ?? 0) <= 0) {
-          toast({ title: "Cannot publish product with ₹0 selling price", type: "error" });
+          toast({ title: `Cannot publish product with ${sym}0 selling price`, type: "error" });
           return;
         }
         const { error } = await supabase.rpc("publish_product_prices", {
@@ -310,8 +455,8 @@ export function ManufacturerDetailPage() {
       const { publishedCount, skippedZeroPriceCount } = await bulkPublishProducts(filteredProducts, queryClient);
       if (publishedCount === 0 && skippedZeroPriceCount > 0) {
         toast({
-          title: "Cannot publish ₹0 price products",
-          description: `${skippedZeroPriceCount} unpublished product(s) have a ₹0 selling price. Set manufacturer price or margin first.`,
+          title: `Cannot publish ${sym}0 price products`,
+          description: `${skippedZeroPriceCount} unpublished product(s) have a ${sym}0 selling price. Set manufacturer price or margin first.`,
           type: "error",
         });
         return;
@@ -320,7 +465,7 @@ export function ManufacturerDetailPage() {
         title: `Published ${publishedCount} product(s) to Customer Catalog`,
         description:
           skippedZeroPriceCount > 0
-            ? `Skipped ${skippedZeroPriceCount} product(s) with ₹0 selling price.`
+            ? `Skipped ${skippedZeroPriceCount} product(s) with ${sym}0 selling price.`
             : undefined,
         type: "success",
       });
@@ -338,8 +483,8 @@ export function ManufacturerDetailPage() {
       const { updatedCount, skippedZeroPriceCount } = await bulkUpdatePublishedPrices(filteredProducts, queryClient);
       if (updatedCount === 0 && skippedZeroPriceCount > 0) {
         toast({
-          title: "Cannot update ₹0 price products",
-          description: `${skippedZeroPriceCount} published product(s) have a ₹0 draft selling price.`,
+          title: `Cannot update ${sym}0 price products`,
+          description: `${skippedZeroPriceCount} published product(s) have a ${sym}0 draft selling price.`,
           type: "error",
         });
         return;
@@ -348,7 +493,7 @@ export function ManufacturerDetailPage() {
         title: `Updated live selling prices for ${updatedCount} published product(s)`,
         description:
           skippedZeroPriceCount > 0
-            ? `Skipped ${skippedZeroPriceCount} ₹0-price item(s). Draft products remain unpublished.`
+            ? `Skipped ${skippedZeroPriceCount} ${sym}0-price item(s). Draft products remain unpublished.`
             : "Customer Portal now shows the updated prices for published products.",
         type: "success",
       });
@@ -390,8 +535,11 @@ export function ManufacturerDetailPage() {
     void invalidateCatalogQueries(queryClient);
   };
 
+  const allowedCategoryIds =
+    catFilter === "all" ? null : new Set(getCategoryAndDescendantIds(categories, catFilter));
+
   const filteredProducts = products.filter((p) => {
-    const matchesCat = catFilter === "all" || p.category_id === catFilter;
+    const matchesCat = !allowedCategoryIds || allowedCategoryIds.has(p.category_id);
     const q = search.toLowerCase();
     const matchesQ = !q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q);
     return matchesCat && matchesQ;
@@ -410,9 +558,30 @@ export function ManufacturerDetailPage() {
     return <div className="py-12 text-center text-sm text-red-600">Manufacturer not found.</div>;
   }
 
+  const handleDownloadManufacturerPdf = async () => {
+    if (!id || exportingPdf) return;
+    setExportingPdf(true);
+    try {
+      const res = await exportSingleManufacturerPdf(id);
+      toast({
+        title: "Manufacturer PDF downloaded",
+        description: `Exported ${res.companyName} with ${res.productCount} product(s) and ${res.poCount} purchase order(s).`,
+        type: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Could not export Manufacturer PDF",
+        description: err instanceof Error ? err.message : "Error",
+        type: "error",
+      });
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <Link
           to="/admin/manufacturers"
           className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-600 hover:text-slate-900"
@@ -420,27 +589,33 @@ export function ManufacturerDetailPage() {
           <ArrowLeft className="h-4 w-4" />
           Back to Manufacturers
         </Link>
-        <StatusBadge status={manufacturer.status} />
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleDownloadManufacturerPdf} disabled={exportingPdf}>
+            {exportingPdf ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileDown className="h-3.5 w-3.5" />}
+            Download Manufacturer PDF
+          </Button>
+          <StatusBadge status={manufacturer.status} />
+        </div>
       </div>
 
       {/* Manufacturer Profile Card */}
       <Card>
-        <CardContent className="p-6">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-            <div className="flex items-start gap-4">
+        <CardContent className="p-4 sm:p-6">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between lg:gap-6">
+            <div className="flex items-start gap-3 sm:gap-4">
               {manufacturer.logo_url ? (
                 <img
                   src={manufacturer.logo_url}
                   alt={manufacturer.company_name}
-                  className="h-16 w-16 rounded-lg border object-cover"
+                  className="h-14 w-14 shrink-0 rounded-lg border object-cover sm:h-16 sm:w-16"
                 />
               ) : (
-                <div className="flex h-16 w-16 items-center justify-center rounded-lg border bg-slate-100 text-lg font-bold text-slate-700">
+                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg border bg-slate-100 text-base font-bold text-slate-700 sm:h-16 sm:w-16 sm:text-lg">
                   {manufacturer.company_name.slice(0, 2).toUpperCase()}
                 </div>
               )}
-              <div>
-                <h1 className="text-2xl font-bold text-slate-900">{manufacturer.company_name}</h1>
+              <div className="min-w-0">
+                <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">{manufacturer.company_name}</h1>
                 <p className="mt-1 text-sm text-slate-600">{manufacturer.description || "No description provided."}</p>
                 <div className="mt-3 flex flex-wrap gap-1.5">
                   {(manufacturer.manufacturer_categories ?? []).map((mc) => (
@@ -455,20 +630,20 @@ export function ManufacturerDetailPage() {
               </div>
             </div>
 
-            <div className="grid gap-2 text-xs text-slate-600 sm:grid-cols-2 lg:w-96">
-              <div className="flex items-center gap-2">
-                <Phone className="h-3.5 w-3.5 text-slate-400" />
-                <span>
+            <div className="grid gap-2 text-xs text-slate-600 sm:grid-cols-2 lg:w-96 lg:shrink-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <Phone className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                <span className="break-words">
                   {manufacturer.contact_person} &bull; {manufacturer.phone}
                 </span>
               </div>
-              <div className="flex items-center gap-2">
-                <Mail className="h-3.5 w-3.5 text-slate-400" />
-                <span>{manufacturer.email || "—"}</span>
+              <div className="flex flex-wrap items-center gap-2">
+                <Mail className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                <span className="break-all">{manufacturer.email || "—"}</span>
               </div>
-              <div className="flex items-center gap-2">
-                <Globe className="h-3.5 w-3.5 text-slate-400" />
-                <span>{manufacturer.website || "—"}</span>
+              <div className="flex flex-wrap items-center gap-2">
+                <Globe className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                <span className="break-all">{manufacturer.website || "—"}</span>
               </div>
               <div className="flex items-center gap-2 font-mono">
                 <span>GSTIN: {manufacturer.gst_number || "—"}</span>
@@ -484,18 +659,18 @@ export function ManufacturerDetailPage() {
 
           {/* Company Photographs */}
           <div className="mt-6 border-t border-slate-100 pt-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                 Company Photographs (Internal Only)
               </h3>
               <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">
                 {uploadingPhotos ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
                 <span>Upload Company Images</span>
-                <input type="file" accept="image/*" multiple className="hidden" onChange={handleGalleryUpload} />
+                <input type="file" accept={RASTER_IMAGE_ACCEPT} multiple className="hidden" onChange={handleGalleryUpload} />
               </label>
             </div>
             {galleryUrls.length > 0 ? (
-              <div className="mt-3 grid grid-cols-3 gap-3 sm:grid-cols-6">
+              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-6">
                 {galleryUrls.map((url, idx) => (
                   <img key={idx} src={url} alt="Facility" className="h-20 w-full rounded border object-cover" />
                 ))}
@@ -614,7 +789,111 @@ export function ManufacturerDetailPage() {
             </Select>
           </div>
 
-          <Table>
+          <div className="divide-y divide-slate-100 rounded-md border border-slate-200 md:hidden">
+            {loadingProducts ? (
+              <div className="py-8 text-center text-sm text-slate-500">Loading products...</div>
+            ) : filteredProducts.length === 0 ? (
+              <div className="py-8 text-center text-sm text-slate-500">No products added for this manufacturer yet.</div>
+            ) : (
+              filteredProducts.map((p) => {
+                const avail = Number(p.inventory?.available_quantity ?? 0);
+                const lowThresh = Number(p.inventory?.low_stock_threshold ?? 10);
+                const stockStat = avail <= 0 ? "out_of_stock" : avail <= lowThresh ? "low_stock" : "in_stock";
+                const sortedPhotos = sortProductImages(p.product_images);
+                const thumb = sortedPhotos[0]?.image_url;
+
+                return (
+                  <div key={p.id} className="space-y-2.5 p-3.5 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                        <button
+                          type="button"
+                          onClick={() => setPhotoProduct(p)}
+                          title={thumb ? "Manage product photos" : "Add product photo"}
+                          className="relative h-10 w-10 shrink-0 overflow-hidden rounded-md border bg-slate-50"
+                        >
+                          {thumb ? (
+                            <img src={thumb} alt={p.name} className="h-full w-full object-cover" />
+                          ) : (
+                            <span className="flex h-full w-full items-center justify-center text-slate-400">
+                              <Camera className="h-3.5 w-3.5" />
+                            </span>
+                          )}
+                        </button>
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-slate-900">{p.name}</p>
+                          <p className="truncate font-mono text-slate-500">
+                            {p.sku} &bull; {p.category?.name}
+                          </p>
+                        </div>
+                      </div>
+                      <StatusBadge
+                        status={p.status === "inactive" ? "inactive" : p.is_published ? "published" : "draft"}
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-600">
+                      <span>Orig: {formatCurrency(p.product_prices?.draft_manufacturer_price ?? 0, sym)}</span>
+                      <span>Margin: {p.product_prices?.draft_margin_percentage ?? 0}%</span>
+                      <span className="font-semibold text-blue-700">
+                        Sell: {formatCurrency(p.product_prices?.draft_selling_price ?? 0, sym)}
+                      </span>
+                      <span>
+                        Stock: {formatQty(avail)} {p.unit_of_measurement}
+                      </span>
+                      <StatusBadge status={stockStat} />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-end gap-1 border-t border-slate-100 pt-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => setPhotoProduct(p)}
+                      >
+                        <Camera className="h-3.5 w-3.5 text-blue-700" />
+                        <span>{sortedPhotos.length > 0 ? `Photos (${sortedPhotos.length})` : "Add Photo"}</span>
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleToggleProductPublish(p)}
+                        title={p.is_published ? "Unpublish" : "Publish"}
+                      >
+                        {p.is_published ? <GlobeLock className="h-4 w-4 text-amber-600" /> : <Globe className="h-4 w-4 text-emerald-600" />}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => {
+                          setEditingProduct(p);
+                          setDuplicateMode(false);
+                          setProductDialogOpen(true);
+                        }}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => {
+                          setEditingProduct(p);
+                          setDuplicateMode(true);
+                          setProductDialogOpen(true);
+                        }}
+                      >
+                        <Copy className="h-4 w-4" />
+                      </Button>
+                      <Button variant="ghost" size="icon" className="text-red-600" onClick={() => handleDeleteProduct(p)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Product</TableHead>
@@ -652,7 +931,7 @@ export function ManufacturerDetailPage() {
                   return (
                     <TableRow key={p.id}>
                       <TableCell>
-                        <div className="flex items-center gap-3">
+                        <div className="flex flex-wrap items-center gap-3">
                           <button
                             type="button"
                             onClick={() => setPhotoProduct(p)}
@@ -686,15 +965,15 @@ export function ManufacturerDetailPage() {
                       </TableCell>
                       <TableCell className="text-xs text-slate-600">{p.category?.name}</TableCell>
                       <TableCell className="font-medium text-slate-900">
-                        {formatCurrency(p.product_prices?.draft_manufacturer_price ?? 0)}
+                        {formatCurrency(p.product_prices?.draft_manufacturer_price ?? 0, sym)}
                       </TableCell>
                       <TableCell className="text-xs text-slate-600">
                         {p.product_prices?.draft_margin_percentage ?? 0}% (
-                        {formatCurrency(p.product_prices?.draft_margin_amount ?? 0)})
+                        {formatCurrency(p.product_prices?.draft_margin_amount ?? 0, sym)})
                       </TableCell>
                       <TableCell className="font-semibold text-blue-700">
                         <div>
-                          <span>{formatCurrency(p.product_prices?.draft_selling_price ?? 0)}</span>
+                          <span>{formatCurrency(p.product_prices?.draft_selling_price ?? 0, sym)}</span>
                           {p.product_prices?.approval_status === "pending_review" && (
                             <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
                               Draft
@@ -703,7 +982,7 @@ export function ManufacturerDetailPage() {
                         </div>
                         {isPublishedWithPendingPrice(p) && (
                           <p className="text-[11px] font-normal text-slate-500">
-                            Live: {formatCurrency(p.product_prices?.published_selling_price ?? 0)}
+                            Live: {formatCurrency(p.product_prices?.published_selling_price ?? 0, sym)}
                           </p>
                         )}
                       </TableCell>
@@ -717,7 +996,14 @@ export function ManufacturerDetailPage() {
                         {formatQty(p.min_order_quantity)} {p.unit_of_measurement}
                       </TableCell>
                       <TableCell>
-                        <StatusBadge status={p.is_published ? "published" : "draft"} />
+                        <div className="flex flex-col gap-1">
+                          <StatusBadge
+                            status={p.status === "inactive" ? "inactive" : p.is_published ? "published" : "draft"}
+                          />
+                          {p.status === "inactive" && p.is_published && (
+                            <span className="text-[10px] text-slate-500">Hidden while inactive</span>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="inline-flex items-center gap-1">
@@ -784,6 +1070,7 @@ export function ManufacturerDetailPage() {
               )}
             </TableBody>
           </Table>
+          </div>
         </CardContent>
       </Card>
 
@@ -827,7 +1114,7 @@ export function ManufacturerDetailPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="percent">Percentage (+/- %)</SelectItem>
-                    <SelectItem value="fixed">Fixed Amount (+/- ₹)</SelectItem>
+                    <SelectItem value="fixed">Fixed Amount (+/- {sym})</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -860,7 +1147,7 @@ export function ManufacturerDetailPage() {
               Upload an Excel (<code>.xlsx</code> / <code>.csv</code>) file containing columns:{" "}
               <code>name, sku, category_name, description, unit_of_measurement, min_order_quantity, hsn_code, gst_rate, manufacturer_price, available_quantity</code>.
             </p>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <Button type="button" variant="outline" size="sm" onClick={downloadImportTemplate}>
                 Download Template (.xlsx)
               </Button>

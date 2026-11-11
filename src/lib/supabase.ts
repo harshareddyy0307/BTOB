@@ -160,3 +160,34 @@ export async function invokeAuthenticatedFunction<T = unknown>(
 
   return data as T;
 }
+
+/**
+ * Fetches all rows across PostgREST `.range(from, to)` pages so catalogs, orders,
+ * invoices, and reports do not silently truncate at Supabase's 1,000-row cap.
+ */
+export async function fetchAllRows<T = unknown>(
+  fetchPage: (
+    from: number,
+    to: number
+  ) => PromiseLike<{ data: unknown[] | null; error: { message?: string } | null }>,
+  pageSize = 1000
+): Promise<T[]> {
+  const all: T[] = [];
+  let from = 0;
+
+  while (true) {
+    const to = from + pageSize - 1;
+    const { data, error } = await fetchPage(from, to);
+    if (error) {
+      throw new Error(error.message || "Failed to fetch records");
+    }
+    const batch = (data ?? []) as T[];
+    all.push(...batch);
+    if (batch.length < pageSize) {
+      break;
+    }
+    from += pageSize;
+  }
+
+  return all;
+}

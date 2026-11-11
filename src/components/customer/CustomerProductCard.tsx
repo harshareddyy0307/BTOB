@@ -13,7 +13,8 @@ import { StatusBadge } from "@/components/shared/StatusBadge";
 import { useToast } from "@/components/ui/toast";
 
 export function CustomerProductCard({ product }: { product: CustomerCatalogProduct }) {
-  const { customerProfile } = useAuth();
+  const { customerProfile, branding } = useAuth();
+  const sym = branding.currency_symbol || "₹";
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -75,7 +76,7 @@ export function CustomerProductCard({ product }: { product: CustomerCatalogProdu
       <CardContent className="flex flex-1 flex-col justify-between p-4 space-y-3">
         <div>
           <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] font-medium uppercase tracking-wider text-blue-700">
+            <span className="min-w-0 truncate text-[11px] font-medium uppercase tracking-wider text-blue-700">
               {product.category_name}
             </span>
             <StatusBadge status={product.stock_status} />
@@ -88,10 +89,10 @@ export function CustomerProductCard({ product }: { product: CustomerCatalogProdu
         </div>
 
         <div className="space-y-3 border-t border-slate-100 pt-3">
-          <div className="flex items-baseline justify-between">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
             <div>
               <p className="text-lg font-bold text-slate-900">
-                {formatCurrency(product.selling_price)}
+                {formatCurrency(product.selling_price, sym)}
                 <span className="text-xs font-normal text-slate-500"> / {product.unit_of_measurement}</span>
               </p>
               <p className="text-[11px] text-slate-500">
@@ -99,7 +100,7 @@ export function CustomerProductCard({ product }: { product: CustomerCatalogProdu
               </p>
             </div>
             {product.has_custom_price && (
-              <span className="rounded bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+              <span className="shrink-0 rounded bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
                 Contract Price
               </span>
             )}

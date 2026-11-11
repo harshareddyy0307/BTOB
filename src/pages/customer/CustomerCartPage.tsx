@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ShoppingCart, Trash2, CheckCircle2, ArrowRight, Loader2, Package } from "lucide-react";
+import { ShoppingCart, Trash2, CheckCircle2, ArrowRight, Loader2, Package, Minus, Plus } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatCurrency, formatQty } from "@/lib/utils";
@@ -20,8 +20,12 @@ interface CartRow {
   product?: CustomerCatalogProduct;
 }
 
+const EMPTY_ADDRESSES: CustomerAddress[] = [];
+const EMPTY_CART_ROWS: CartRow[] = [];
+
 export function CustomerCartPage() {
-  const { customerProfile } = useAuth();
+  const { customerProfile, branding } = useAuth();
+  const sym = branding.currency_symbol || "₹";
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -35,6 +39,8 @@ export function CustomerCartPage() {
   const [pincode, setPincode] = useState(customerProfile?.pincode || "");
   const [notes, setNotes] = useState("");
   const [placing, setPlacing] = useState(false);
+  const [draftQty, setDraftQty] = useState<Record<string, string>>({});
+  const didInitDefaultAddressRef = useRef(false);
 
   const [confirmedOrder, setConfirmedOrder] = useState<{
     order_id: string;
@@ -42,7 +48,7 @@ export function CustomerCartPage() {
     total_amount: number;
   } | null>(null);
 
-  const { data: addresses = [] } = useQuery({
+  const { data: addresses = EMPTY_ADDRESSES } = useQuery({
     queryKey: ["customer-addresses", customerProfile?.id],
     enabled: Boolean(customerProfile?.id),
     queryFn: async () => {
@@ -56,7 +62,12 @@ export function CustomerCartPage() {
   });
 
   useEffect(() => {
-    if (addresses.length > 0 && selectedAddressId === "custom") {
+    didInitDefaultAddressRef.current = false;
+  }, [customerProfile?.id]);
+
+  useEffect(() => {
+    if (!didInitDefaultAddressRef.current && addresses.length > 0) {
+      didInitDefaultAddressRef.current = true;
       const def = addresses.find((a) => a.is_default) || addresses[0];
       setSelectedAddressId(def.id);
       setContactName(def.contact_name || customerProfile?.owner_name || "");
@@ -66,9 +77,9 @@ export function CustomerCartPage() {
       setStateVal(def.state);
       setPincode(def.pincode);
     }
-  }, [addresses, selectedAddressId, customerProfile]);
+  }, [addresses, customerProfile]);
 
-  const { data: cartRows = [], isLoading } = useQuery({
+  const { data: cartRows = EMPTY_CART_ROWS, isLoading } = useQuery({
     queryKey: ["customer-cart", customerProfile?.id],
     enabled: Boolean(customerProfile?.id),
     queryFn: async () => {
@@ -95,6 +106,24 @@ export function CustomerCartPage() {
     },
   });
 
+  useEffect(() => {
+    setDraftQty((prev) => {
+      const next: Record<string, string> = {};
+      cartRows.forEach((r) => {
+        next[r.id] = String(r.quantity);
+      });
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(next);
+      if (
+        prevKeys.length === nextKeys.length &&
+        nextKeys.every((k) => Object.prototype.hasOwnProperty.call(prev, k) && prev[k] === next[k])
+      ) {
+        return prev;
+      }
+      return next;
+    });
+  }, [cartRows]);
+
   const handleSelectAddress = (addrId: string) => {
     setSelectedAddressId(addrId);
     const found = addresses.find((a) => a.id === addrId);
@@ -109,22 +138,45 @@ export function CustomerCartPage() {
   };
 
   const updateQty = async (row: CartRow, nextQty: number) => {
-    const moq = Number(row.product?.min_order_quantity ?? 1);
+    const moq = Math.max(1, Number(row.product?.min_order_quantity ?? 1));
     const maxAvail = Number(row.product?.available_quantity ?? 0);
-    if (nextQty < moq) {
+    if (!Number.isFinite(nextQty) || nextQty < moq) {
       toast({ title: `Minimum order quantity is ${formatQty(moq)}`, type: "error" });
+      setDraftQty((prev) => ({ ...prev, [row.id]: String(row.quantity) }));
       return;
     }
     if (nextQty > maxAvail) {
       toast({ title: `Only ${formatQty(maxAvail)} available in stock`, type: "error" });
+      setDraftQty((prev) => ({ ...prev, [row.id]: String(row.quantity) }));
       return;
     }
-    await supabase.from("cart_items").update({ quantity: nextQty }).eq("id", row.id);
+    if (nextQty === Number(row.quantity)) return;
+
+    const { error } = await supabase.from("cart_items").update({ quantity: nextQty }).eq("id", row.id);
+    if (error) {
+      toast({ title: "Could not update quantity", description: error.message, type: "error" });
+      setDraftQty((prev) => ({ ...prev, [row.id]: String(row.quantity) }));
+      return;
+    }
     queryClient.invalidateQueries({ queryKey: ["customer-cart"] });
   };
 
+  const commitDraftQty = (row: CartRow) => {
+    const raw = draftQty[row.id] ?? String(row.quantity);
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setDraftQty((prev) => ({ ...prev, [row.id]: String(row.quantity) }));
+      return;
+    }
+    void updateQty(row, parsed);
+  };
+
   const removeItem = async (rowId: string) => {
-    await supabase.from("cart_items").delete().eq("id", rowId);
+    const { error } = await supabase.from("cart_items").delete().eq("id", rowId);
+    if (error) {
+      toast({ title: "Could not remove item", description: error.message, type: "error" });
+      return;
+    }
     queryClient.invalidateQueries({ queryKey: ["customer-cart"] });
     queryClient.invalidateQueries({ queryKey: ["customer-cart-count"] });
   };
@@ -189,17 +241,17 @@ export function CustomerCartPage() {
   if (confirmedOrder) {
     return (
       <Card className="mx-auto max-w-xl">
-        <CardContent className="p-8 text-center space-y-4">
+        <CardContent className="space-y-4 p-6 text-center sm:p-8">
           <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
             <CheckCircle2 className="h-6 w-6" />
           </div>
-          <h1 className="text-2xl font-bold text-slate-900">Order Confirmed!</h1>
+          <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">Order Confirmed!</h1>
           <p className="text-sm text-slate-600">
             Your wholesale order <strong>{confirmedOrder.order_number}</strong> totaling{" "}
-            <strong>{formatCurrency(confirmedOrder.total_amount)}</strong> has been received and sent to our operations
+            <strong>{formatCurrency(confirmedOrder.total_amount, sym)}</strong> has been received and sent to our operations
             team.
           </p>
-          <div className="flex justify-center gap-3 pt-2">
+          <div className="flex flex-wrap justify-center gap-3 pt-2">
             <Button onClick={() => navigate(`/customer/orders/${confirmedOrder.order_id}`)}>
               Track Order
               <ArrowRight className="h-4 w-4" />
@@ -216,7 +268,7 @@ export function CustomerCartPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="flex items-center gap-2 text-2xl font-bold text-slate-900">
+        <h1 className="flex items-center gap-2 text-xl font-bold text-slate-900 sm:text-2xl">
           <ShoppingCart className="h-5 w-5 text-blue-700" />
           Shopping Cart &amp; Checkout
         </h1>
@@ -248,34 +300,65 @@ export function CustomerCartPage() {
                   const lineSub = unitPrice * Number(row.quantity);
                   return (
                     <div key={row.id} className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
-                      <div className="flex items-center gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
                         {p?.primary_image_url ? (
-                          <img src={p.primary_image_url} alt={p.name} className="h-14 w-14 rounded border object-cover" />
+                          <img src={p.primary_image_url} alt={p.name} className="h-14 w-14 shrink-0 rounded border object-cover" />
                         ) : (
-                          <div className="flex h-14 w-14 items-center justify-center rounded border bg-slate-100 text-slate-400">
+                          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded border bg-slate-100 text-slate-400">
                             <Package className="h-5 w-5" />
                           </div>
                         )}
-                        <div>
+                        <div className="min-w-0 flex-1">
                           <p className="font-semibold text-slate-900">{p?.name || "Unavailable product"}</p>
                           <p className="text-xs text-slate-500">
-                            {formatCurrency(unitPrice)} / {p?.unit_of_measurement} &bull; MOQ:{" "}
+                            {formatCurrency(unitPrice, sym)} / {p?.unit_of_measurement} &bull; MOQ:{" "}
                             {formatQty(p?.min_order_quantity)} &bull; Stock: {formatQty(p?.available_quantity)} &bull;{" "}
                             {p?.gst_rate}% GST
                           </p>
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between gap-4 sm:justify-end">
-                        <Input
-                          type="number"
-                          min={Number(p?.min_order_quantity ?? 1)}
-                          max={Number(p?.available_quantity ?? 999999)}
-                          value={row.quantity}
-                          onChange={(e) => updateQty(row, Number(e.target.value))}
-                          className="h-8 w-24 text-sm"
-                        />
-                        <p className="w-24 text-right text-sm font-semibold text-slate-900">{formatCurrency(lineSub)}</p>
+                      <div className="flex flex-wrap items-center justify-between gap-2 sm:justify-end sm:gap-3">
+                        <div className="inline-flex items-center rounded-md border border-slate-200 bg-white">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 rounded-r-none"
+                            onClick={() => updateQty(row, Number(row.quantity) - 1)}
+                            disabled={Number(row.quantity) <= Math.max(1, Number(p?.min_order_quantity ?? 1))}
+                            aria-label="Decrease quantity"
+                          >
+                            <Minus className="h-3.5 w-3.5" />
+                          </Button>
+                          <Input
+                            type="number"
+                            min={Math.max(1, Number(p?.min_order_quantity ?? 1))}
+                            max={Number(p?.available_quantity ?? 999999)}
+                            value={draftQty[row.id] ?? String(row.quantity)}
+                            onChange={(e) => setDraftQty((prev) => ({ ...prev, [row.id]: e.target.value }))}
+                            onBlur={() => commitDraftQty(row)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                commitDraftQty(row);
+                              }
+                            }}
+                            className="h-8 w-16 rounded-none border-y-0 border-x border-slate-200 px-1 text-center text-sm shadow-none focus-visible:ring-0"
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 rounded-l-none"
+                            onClick={() => updateQty(row, Number(row.quantity) + 1)}
+                            disabled={Number(row.quantity) >= Number(p?.available_quantity ?? 0)}
+                            aria-label="Increase quantity"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                        <p className="min-w-[4.5rem] text-right text-sm font-semibold text-slate-900">{formatCurrency(lineSub, sym)}</p>
                         <Button variant="ghost" size="icon" className="text-red-600" onClick={() => removeItem(row.id)}>
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -328,7 +411,7 @@ export function CustomerCartPage() {
                     <Input value={addressLine} onChange={(e) => setAddressLine(e.target.value)} required />
                   </div>
 
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                     <Input placeholder="City" value={city} onChange={(e) => setCity(e.target.value)} required />
                     <Input placeholder="State" value={stateVal} onChange={(e) => setStateVal(e.target.value)} required />
                     <Input placeholder="Pincode" value={pincode} onChange={(e) => setPincode(e.target.value)} required />
@@ -347,15 +430,15 @@ export function CustomerCartPage() {
                   <div className="space-y-2 border-t border-slate-200 pt-3 text-sm">
                     <div className="flex justify-between text-slate-600">
                       <span>Subtotal</span>
-                      <span>{formatCurrency(subtotal)}</span>
+                      <span>{formatCurrency(subtotal, sym)}</span>
                     </div>
                     <div className="flex justify-between text-slate-600">
                       <span>Applicable GST</span>
-                      <span>{formatCurrency(taxTotal)}</span>
+                      <span>{formatCurrency(taxTotal, sym)}</span>
                     </div>
                     <div className="flex justify-between border-t border-slate-200 pt-2 text-base font-bold text-slate-900">
                       <span>Total Amount</span>
-                      <span>{formatCurrency(grandTotal)}</span>
+                      <span>{formatCurrency(grandTotal, sym)}</span>
                     </div>
                   </div>
 

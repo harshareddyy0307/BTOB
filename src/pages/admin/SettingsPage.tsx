@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { Settings, Users, ShieldCheck, Upload, Plus, Power, Loader2, History, KeyRound } from "lucide-react";
 import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
-import { uploadStorageFile } from "@/lib/storage";
+import { RASTER_IMAGE_ACCEPT, uploadStorageFile } from "@/lib/storage";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDateTime } from "@/lib/utils";
 import type { AgencySettings, AppUser, AuditLogRecord } from "@/types/database";
@@ -202,8 +202,8 @@ export function SettingsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight text-slate-900">
-          <Settings className="h-6 w-6 text-blue-700" />
+        <h1 className="flex items-center gap-2 text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
+          <Settings className="h-5 w-5 shrink-0 text-blue-700 sm:h-6 sm:w-6" />
           Agency Settings &amp; Access Control
         </h1>
         <p className="text-sm text-slate-500">
@@ -259,7 +259,7 @@ export function SettingsPage() {
                       <span>Upload Agency Logo</span>
                       <input
                         type="file"
-                        accept="image/*"
+                        accept={RASTER_IMAGE_ACCEPT}
                         className="hidden"
                         disabled={!isOwnerAdmin}
                         onChange={handleUploadLogo}
@@ -289,7 +289,7 @@ export function SettingsPage() {
                   </div>
                 </div>
 
-                <div className="grid gap-4 sm:grid-cols-4">
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                   <div className="space-y-1.5">
                     <Label>Agency GSTIN</Label>
                     <Input
@@ -359,7 +359,7 @@ export function SettingsPage() {
                   </div>
                 </div>
 
-                <div className="grid gap-4 sm:grid-cols-5">
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
                   <div className="space-y-1.5">
                     <Label>Default GST %</Label>
                     <Input
@@ -427,7 +427,7 @@ export function SettingsPage() {
                 </div>
 
                 {isOwnerAdmin && (
-                  <Button type="submit" disabled={savingSettings}>
+                  <Button type="submit" className="w-full sm:w-auto" disabled={savingSettings}>
                     {savingSettings && <Loader2 className="h-4 w-4 animate-spin" />}
                     Save Agency Settings
                   </Button>
@@ -442,12 +442,12 @@ export function SettingsPage() {
         </TabsContent>
 
         <TabsContent value="staff" className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-sm text-slate-600">
               Authorized staff manage manufacturers, catalog pricing, customer orders, purchase orders, and inventory.
             </p>
             {isOwnerAdmin && (
-              <Button onClick={() => setStaffOpen(true)}>
+              <Button className="w-full shrink-0 sm:w-auto" onClick={() => setStaffOpen(true)}>
                 <Plus className="h-4 w-4" />
                 Add Staff / Admin User
               </Button>
@@ -462,71 +462,124 @@ export function SettingsPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Full Name</TableHead>
-                    <TableHead>Email</TableHead>
-                    <TableHead>Phone</TableHead>
-                    <TableHead>Role</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead className="text-right">Action</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {loadingStaff ? (
-                    <TableRow>
-                      <TableCell colSpan={6} className="py-8 text-center text-slate-500">
-                        Loading staff accounts...
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    staffUsers.map((u) => (
-                      <TableRow key={u.id}>
-                        <TableCell className="font-semibold text-slate-900">
-                          <div>
+              <div className="divide-y divide-slate-100 md:hidden">
+                {loadingStaff ? (
+                  <p className="py-8 text-center text-sm text-slate-500">Loading staff accounts...</p>
+                ) : staffUsers.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-slate-500">No staff accounts found.</p>
+                ) : (
+                  staffUsers.map((u) => (
+                    <div key={u.id} className="space-y-2 p-4 text-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-slate-900">
                             {u.full_name}
                             {u.id === userProfile?.id && (
                               <span className="ml-2 text-xs font-normal text-blue-700">(You)</span>
                             )}
-                          </div>
-                          {u.username && (
-                            <span className="font-mono text-[11px] font-normal text-slate-500">@{u.username}</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-xs text-slate-600">{u.email}</TableCell>
-                        <TableCell className="text-xs text-slate-600">{u.phone || "—"}</TableCell>
-                        <TableCell>
-                          <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-semibold uppercase text-slate-700">
-                            {u.role}
-                          </span>
-                        </TableCell>
-                        <TableCell>
-                          <StatusBadge status={u.is_active ? "active" : "inactive"} />
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {isOwnerAdmin && u.id !== userProfile?.id && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => toggleStaffStatus(u)}
-                              disabled={togglingUserId === u.id}
-                              title={u.is_active ? "Deactivate" : "Activate"}
-                            >
-                              {togglingUserId === u.id ? (
-                                <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
-                              ) : (
-                                <Power className={u.is_active ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-emerald-600"} />
-                              )}
-                              {u.is_active ? "Deactivate" : "Activate"}
-                            </Button>
-                          )}
+                          </p>
+                          {u.username && <p className="font-mono text-slate-500">@{u.username}</p>}
+                        </div>
+                        <StatusBadge status={u.is_active ? "active" : "inactive"} />
+                      </div>
+
+                      <div className="space-y-1 text-slate-600">
+                        <p className="break-all">Email: {u.email}</p>
+                        <p>Phone: {u.phone || "—"}</p>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <span className="rounded bg-slate-100 px-2 py-0.5 font-semibold uppercase text-slate-700">
+                          {u.role}
+                        </span>
+                        {isOwnerAdmin && u.id !== userProfile?.id && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => toggleStaffStatus(u)}
+                            disabled={togglingUserId === u.id}
+                          >
+                            {togglingUserId === u.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-500" />
+                            ) : (
+                              <Power className={u.is_active ? "h-3.5 w-3.5 text-amber-600" : "h-3.5 w-3.5 text-emerald-600"} />
+                            )}
+                            {u.is_active ? "Deactivate" : "Activate"}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Full Name</TableHead>
+                      <TableHead>Email</TableHead>
+                      <TableHead>Phone</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {loadingStaff ? (
+                      <TableRow>
+                        <TableCell colSpan={6} className="py-8 text-center text-slate-500">
+                          Loading staff accounts...
                         </TableCell>
                       </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
+                    ) : (
+                      staffUsers.map((u) => (
+                        <TableRow key={u.id}>
+                          <TableCell className="font-semibold text-slate-900">
+                            <div>
+                              {u.full_name}
+                              {u.id === userProfile?.id && (
+                                <span className="ml-2 text-xs font-normal text-blue-700">(You)</span>
+                              )}
+                            </div>
+                            {u.username && (
+                              <span className="font-mono text-[11px] font-normal text-slate-500">@{u.username}</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-xs text-slate-600">{u.email}</TableCell>
+                          <TableCell className="text-xs text-slate-600">{u.phone || "—"}</TableCell>
+                          <TableCell>
+                            <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-semibold uppercase text-slate-700">
+                              {u.role}
+                            </span>
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge status={u.is_active ? "active" : "inactive"} />
+                          </TableCell>
+                          <TableCell className="text-right">
+                            {isOwnerAdmin && u.id !== userProfile?.id && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => toggleStaffStatus(u)}
+                                disabled={togglingUserId === u.id}
+                                title={u.is_active ? "Deactivate" : "Activate"}
+                              >
+                                {togglingUserId === u.id ? (
+                                  <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
+                                ) : (
+                                  <Power className={u.is_active ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-emerald-600"} />
+                                )}
+                                {u.is_active ? "Deactivate" : "Activate"}
+                              </Button>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -541,50 +594,80 @@ export function SettingsPage() {
               <CardDescription>Last 100 security &amp; operational events across the platform.</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Timestamp</TableHead>
-                    <TableHead>Actor</TableHead>
-                    <TableHead>Action</TableHead>
-                    <TableHead>Entity</TableHead>
-                    <TableHead>Details</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {loadingLogs ? (
+              <div className="divide-y divide-slate-100 md:hidden">
+                {loadingLogs ? (
+                  <p className="py-8 text-center text-sm text-slate-500">Loading audit logs...</p>
+                ) : auditLogs.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-slate-500">No audit entries logged yet.</p>
+                ) : (
+                  auditLogs.map((log) => (
+                    <div key={log.id} className="space-y-1.5 p-4 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="rounded bg-blue-50 px-2 py-0.5 font-mono font-semibold text-blue-800">
+                          {log.action}
+                        </span>
+                        <span className="text-[11px] text-slate-500">{formatDateTime(log.created_at)}</span>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-slate-700">
+                        <span className="font-medium">{log.users?.full_name || log.actor_user_id || "System"}</span>
+                        <span className="text-slate-500">{log.entity_type}</span>
+                      </div>
+                      {log.new_data && (
+                        <p className="break-all rounded bg-slate-50 p-2 font-mono text-[11px] text-slate-600">
+                          {JSON.stringify(log.new_data)}
+                        </p>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
                     <TableRow>
-                      <TableCell colSpan={5} className="py-8 text-center text-slate-500">
-                        Loading audit logs...
-                      </TableCell>
+                      <TableHead>Timestamp</TableHead>
+                      <TableHead>Actor</TableHead>
+                      <TableHead>Action</TableHead>
+                      <TableHead>Entity</TableHead>
+                      <TableHead>Details</TableHead>
                     </TableRow>
-                  ) : auditLogs.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={5} className="py-8 text-center text-slate-500">
-                        No audit entries logged yet.
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    auditLogs.map((log) => (
-                      <TableRow key={log.id}>
-                        <TableCell className="text-xs text-slate-500">{formatDateTime(log.created_at)}</TableCell>
-                        <TableCell className="text-xs font-medium text-slate-800">
-                          {log.users?.full_name || log.actor_user_id || "System"}
-                        </TableCell>
-                        <TableCell>
-                          <span className="rounded bg-blue-50 px-2 py-0.5 font-mono text-xs font-semibold text-blue-800">
-                            {log.action}
-                          </span>
-                        </TableCell>
-                        <TableCell className="text-xs text-slate-600">{log.entity_type}</TableCell>
-                        <TableCell className="max-w-sm truncate font-mono text-[11px] text-slate-500">
-                          {log.new_data ? JSON.stringify(log.new_data) : "—"}
+                  </TableHeader>
+                  <TableBody>
+                    {loadingLogs ? (
+                      <TableRow>
+                        <TableCell colSpan={5} className="py-8 text-center text-slate-500">
+                          Loading audit logs...
                         </TableCell>
                       </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
+                    ) : auditLogs.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={5} className="py-8 text-center text-slate-500">
+                          No audit entries logged yet.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      auditLogs.map((log) => (
+                        <TableRow key={log.id}>
+                          <TableCell className="text-xs text-slate-500">{formatDateTime(log.created_at)}</TableCell>
+                          <TableCell className="text-xs font-medium text-slate-800">
+                            {log.users?.full_name || log.actor_user_id || "System"}
+                          </TableCell>
+                          <TableCell>
+                            <span className="rounded bg-blue-50 px-2 py-0.5 font-mono text-xs font-semibold text-blue-800">
+                              {log.action}
+                            </span>
+                          </TableCell>
+                          <TableCell className="text-xs text-slate-600">{log.entity_type}</TableCell>
+                          <TableCell className="max-w-sm truncate font-mono text-[11px] text-slate-500">
+                            {log.new_data ? JSON.stringify(log.new_data) : "—"}
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>

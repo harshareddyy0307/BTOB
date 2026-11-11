@@ -7,6 +7,9 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+const EMAIL_RE = /^[^\s@%]+@[^\s@%]+\.[^\s@%]{2,}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -17,6 +20,10 @@ function jsonResponse(body: unknown, status = 200) {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
+  }
+
+  if (req.method !== "POST") {
+    return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
   try {
@@ -66,20 +73,38 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Forbidden: Agency Admin or Staff access required" }, 403);
     }
 
-    const body = await req.json();
-    const { action } = body;
+    const body = await req.json().catch(() => null);
+    const action = body?.action;
 
     if (action === "create_staff") {
       if (callerRole !== "admin") {
         return jsonResponse({ error: "Forbidden: Agency Owner Admin access required" }, 403);
       }
 
-      const { full_name, email, phone, password, role_name = "staff" } = body;
+      const full_name = String(body?.full_name ?? "").trim();
+      const email = String(body?.email ?? "").trim().toLowerCase();
+      const phone = String(body?.phone ?? "").trim();
+      const password = String(body?.password ?? "");
+      const role_name = String(body?.role_name ?? "staff").trim().toLowerCase();
+
       if (!["admin", "staff"].includes(role_name)) {
         return jsonResponse({ error: "Role must be admin or staff" }, 400);
       }
-      if (!full_name || !email || !password || String(password).length < 8) {
-        return jsonResponse({ error: "Name, email, and 8+ character password are required" }, 400);
+      if (full_name.length < 2 || !email || !password || password.length < 8) {
+        return jsonResponse({ error: "Name (2+ chars), valid email, and 8+ character password are required" }, 400);
+      }
+      if (email.length > 160 || !EMAIL_RE.test(email) || /[\r\n\t]/.test(email)) {
+        return jsonResponse({ error: "Enter a valid email address" }, 400);
+      }
+
+      const { data: dupEmail } = await adminClient
+        .from("users")
+        .select("id")
+        .eq("email", email)
+        .maybeSingle();
+
+      if (dupEmail) {
+        return jsonResponse({ error: "An account with this email already exists." }, 409);
       }
 
       const { data: roleRow } = await adminClient.from("roles").select("id").eq("name", role_name).single();
@@ -88,8 +113,8 @@ Deno.serve(async (req: Request) => {
       }
 
       const { data: authData, error: createErr } = await adminClient.auth.admin.createUser({
-        email: String(email).trim().toLowerCase(),
-        password: String(password),
+        email,
+        password,
         email_confirm: true,
         app_metadata: { role: role_name },
         user_metadata: { full_name },
@@ -105,7 +130,7 @@ Deno.serve(async (req: Request) => {
           id: authData.user.id,
           role_id: roleRow.id,
           full_name,
-          email: String(email).trim().toLowerCase(),
+          email,
           phone: phone || null,
           is_active: true,
         })
@@ -114,7 +139,7 @@ Deno.serve(async (req: Request) => {
 
       if (insErr) {
         await adminClient.auth.admin.deleteUser(authData.user.id);
-        return jsonResponse({ error: insErr.message }, 400);
+        return jsonResponse({ error: insErr.message }, insErr.code === "23505" ? 409 : 400);
       }
 
       await adminClient.from("audit_logs").insert({
@@ -129,13 +154,13 @@ Deno.serve(async (req: Request) => {
     }
 
     if (action === "toggle_user_status") {
-      const targetUserId = typeof body.user_id === "string" ? body.user_id.trim() : "";
-      const is_active = body.is_active;
+      const targetUserId = typeof body?.user_id === "string" ? body.user_id.trim() : "";
+      const is_active = body?.is_active;
       const requestedCustomerStatus =
-        typeof body.customer_status === "string" ? body.customer_status.trim().toLowerCase() : undefined;
+        typeof body?.customer_status === "string" ? body.customer_status.trim().toLowerCase() : undefined;
 
-      if (!targetUserId || typeof is_active !== "boolean") {
-        return jsonResponse({ error: "user_id and is_active boolean required" }, 400);
+      if (!UUID_RE.test(targetUserId) || typeof is_active !== "boolean") {
+        return jsonResponse({ error: "Valid user_id (UUID) and is_active boolean required" }, 400);
       }
 
       if (
@@ -178,6 +203,18 @@ Deno.serve(async (req: Request) => {
 
       if (targetUserId === caller.id && !is_active) {
         return jsonResponse({ error: "You cannot deactivate your own account" }, 400);
+      }
+
+      if (targetRole === "admin" && targetProfile.is_active && !is_active) {
+        const { count: activeAdmins } = await adminClient
+          .from("users")
+          .select("id, roles!inner(name)", { count: "exact", head: true })
+          .eq("roles.name", "admin")
+          .eq("is_active", true);
+
+        if ((activeAdmins ?? 0) <= 1) {
+          return jsonResponse({ error: "Cannot deactivate the last active Agency Owner Admin account." }, 400);
+        }
       }
 
       let existingCustomerId: string | null = null;

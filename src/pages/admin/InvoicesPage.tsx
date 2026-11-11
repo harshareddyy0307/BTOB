@@ -11,11 +11,11 @@ import {
   Search,
   ExternalLink,
 } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { supabase, fetchAllRows } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { getManufacturerAssetSignedUrl } from "@/lib/storage";
 import { generateCustomerInvoicePdf } from "@/lib/pdfGenerator";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate, toLocalDateString } from "@/lib/utils";
 import {
   PAYMENT_METHODS,
   type AgencySettings,
@@ -58,7 +58,7 @@ export function InvoicesPage() {
   const [payAmount, setPayAmount] = useState("");
   const [payMethod, setPayMethod] = useState<PaymentMethod>("Bank Transfer");
   const [payRef, setPayRef] = useState("");
-  const [payDate, setPayDate] = useState(new Date().toISOString().slice(0, 10));
+  const [payDate, setPayDate] = useState(toLocalDateString());
   const [payNotes, setPayNotes] = useState("");
   const [recordingPay, setRecordingPay] = useState(false);
 
@@ -67,27 +67,37 @@ export function InvoicesPage() {
 
   const { data: invoices = [], isLoading } = useQuery({
     queryKey: ["admin-invoices"],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("invoices")
-        .select("*, customers(*), orders(*)")
-        .order("invoice_date", { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as unknown as InvoiceWithRelations[];
-    },
+    queryFn: async () =>
+      fetchAllRows<InvoiceWithRelations>((from, to) =>
+        supabase
+          .from("invoices")
+          .select("*, customers(*), orders(*)")
+          .order("invoice_date", { ascending: false })
+          .range(from, to)
+      ),
   });
 
   const { data: ordersWithoutInvoice = [] } = useQuery({
     queryKey: ["admin-orders-needing-invoice"],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("orders")
-        .select("id, order_number, total_amount, order_status, placed_at, customers(business_name), invoices(id)")
-        .neq("order_status", "Cancelled")
-        .order("placed_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []).filter((o) => {
-        const inv = o.invoices as unknown as { id: string }[] | { id: string } | null;
+      const rows = await fetchAllRows<{
+        id: string;
+        order_number: string;
+        total_amount: number;
+        order_status: string;
+        placed_at: string;
+        customers: { business_name: string } | null;
+        invoices: { id: string }[] | { id: string } | null;
+      }>((from, to) =>
+        supabase
+          .from("orders")
+          .select("id, order_number, total_amount, order_status, placed_at, customers(business_name), invoices(id)")
+          .neq("order_status", "Cancelled")
+          .order("placed_at", { ascending: false })
+          .range(from, to)
+      );
+      return rows.filter((o) => {
+        const inv = o.invoices;
         return Array.isArray(inv) ? inv.length === 0 : !inv;
       });
     },
@@ -95,14 +105,14 @@ export function InvoicesPage() {
 
   const { data: mfgPos = [] } = useQuery({
     queryKey: ["admin-mfg-purchase-invoices"],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("purchase_orders")
-        .select("*, manufacturers(*), orders(id, order_number, order_status)")
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as unknown as PurchaseOrderRecord[];
-    },
+    queryFn: async () =>
+      fetchAllRows<PurchaseOrderRecord>((from, to) =>
+        supabase
+          .from("purchase_orders")
+          .select("*, manufacturers(*), orders(id, order_number, order_status)")
+          .order("created_at", { ascending: false })
+          .range(from, to)
+      ),
   });
 
   const { data: agency } = useQuery({
@@ -153,7 +163,7 @@ export function InvoicesPage() {
     setPayAmount(balance.toFixed(2));
     setPayMethod("Bank Transfer");
     setPayRef("");
-    setPayDate(new Date().toISOString().slice(0, 10));
+    setPayDate(toLocalDateString());
     setPayNotes("");
   };
 
@@ -194,7 +204,10 @@ export function InvoicesPage() {
   };
 
   const handleDownloadPdf = async (inv: InvoiceWithRelations) => {
-    if (!agency) return;
+    if (!agency) {
+      toast({ title: "Cannot generate Invoice PDF", description: "Agency settings are still loading.", type: "error" });
+      return;
+    }
     const [{ data: orderItems }, { data: payments }] = await Promise.all([
       supabase.from("order_items").select("*").eq("order_id", inv.order_id).order("created_at"),
       supabase.from("payments").select("*").eq("invoice_id", inv.id).order("payment_date"),
@@ -215,12 +228,14 @@ export function InvoicesPage() {
     if (url) window.open(url, "_blank", "noopener,noreferrer");
   };
 
-  const totalBilled = invoices.reduce((s, i) => s + Number(i.total_amount), 0);
-  const totalCollected = invoices.reduce((s, i) => s + Number(i.paid_amount), 0);
+  const activeInvoices = invoices.filter((i) => i.orders?.order_status !== "Cancelled");
+  const totalBilled = activeInvoices.reduce((s, i) => s + Number(i.total_amount), 0);
+  const totalCollected = activeInvoices.reduce((s, i) => s + Number(i.paid_amount), 0);
   const totalOutstanding = Math.max(0, totalBilled - totalCollected);
 
   const filteredInvoices = invoices.filter((i) => {
-    if (statusFilter !== "all" && i.payment_status !== statusFilter) return false;
+    const effectiveStatus = i.orders?.order_status === "Cancelled" ? "cancelled" : i.payment_status;
+    if (statusFilter !== "all" && effectiveStatus !== statusFilter) return false;
     const q = search.toLowerCase().trim();
     if (!q) return true;
     return (
@@ -233,30 +248,30 @@ export function InvoicesPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight text-slate-900">Invoices &amp; Payments</h1>
+        <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">Invoices &amp; Payments</h1>
         <p className="text-sm text-slate-500">
           Generate Indian GST invoices (CGST+SGST / IGST), track customer receivables, record payments, and audit manufacturer bills.
         </p>
       </div>
 
       {/* KPI Cards */}
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-3 sm:gap-4">
         <Card>
           <CardContent className="p-4">
             <p className="text-xs font-medium text-slate-500">Total Billed (Receivables)</p>
-            <p className="mt-1 text-2xl font-bold text-slate-900">{formatCurrency(totalBilled, sym)}</p>
+            <p className="mt-1 text-xl font-bold text-slate-900 sm:text-2xl">{formatCurrency(totalBilled, sym)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
             <p className="text-xs font-medium text-slate-500">Total Payments Collected</p>
-            <p className="mt-1 text-2xl font-bold text-emerald-700">{formatCurrency(totalCollected, sym)}</p>
+            <p className="mt-1 text-xl font-bold text-emerald-700 sm:text-2xl">{formatCurrency(totalCollected, sym)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
             <p className="text-xs font-medium text-slate-500">Total Outstanding Balance</p>
-            <p className="mt-1 text-2xl font-bold text-red-700">{formatCurrency(totalOutstanding, sym)}</p>
+            <p className="mt-1 text-xl font-bold text-red-700 sm:text-2xl">{formatCurrency(totalOutstanding, sym)}</p>
           </CardContent>
         </Card>
       </div>
@@ -289,6 +304,7 @@ export function InvoicesPage() {
                   <SelectItem value="unpaid">Unpaid</SelectItem>
                   <SelectItem value="partially_paid">Partially Paid</SelectItem>
                   <SelectItem value="paid">Paid</SelectItem>
+                  <SelectItem value="cancelled">Void (Cancelled Order)</SelectItem>
                 </SelectContent>
               </Select>
             </CardContent>
@@ -296,108 +312,197 @@ export function InvoicesPage() {
 
           <Card>
             <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Invoice #</TableHead>
-                    <TableHead>Customer Business</TableHead>
-                    <TableHead>Order Ref</TableHead>
-                    <TableHead>GST Breakdown</TableHead>
-                    <TableHead>Total / Paid</TableHead>
-                    <TableHead>Balance Due</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {isLoading ? (
-                    <TableRow>
-                      <TableCell colSpan={8} className="py-10 text-center text-slate-500">
-                        Loading invoices...
-                      </TableCell>
-                    </TableRow>
-                  ) : filteredInvoices.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={8} className="py-10 text-center text-slate-500">
-                        No invoices found.
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    filteredInvoices.map((inv) => {
-                      const balance = Math.max(0, Number(inv.total_amount) - Number(inv.paid_amount));
-                      return (
-                        <TableRow key={inv.id}>
-                          <TableCell>
-                            <p className="font-semibold text-slate-900">{inv.invoice_number}</p>
-                            <p className="text-xs text-slate-500">
+              <div className="divide-y divide-slate-100 md:hidden">
+                {isLoading ? (
+                  <p className="py-10 text-center text-sm text-slate-500">Loading invoices...</p>
+                ) : filteredInvoices.length === 0 ? (
+                  <p className="py-10 text-center text-sm text-slate-500">No invoices found.</p>
+                ) : (
+                  filteredInvoices.map((inv) => {
+                    const isOrderCancelled = inv.orders?.order_status === "Cancelled";
+                    const balance = isOrderCancelled
+                      ? 0
+                      : Math.max(0, Number(inv.total_amount) - Number(inv.paid_amount));
+                    return (
+                      <div key={inv.id} className={isOrderCancelled ? "space-y-2.5 bg-slate-50/70 p-4 text-xs" : "space-y-2.5 p-4 text-xs"}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-slate-900">{inv.invoice_number}</p>
+                            <p className="text-slate-500">
                               {formatDate(inv.invoice_date)} &bull; Due {formatDate(inv.due_date)}
                             </p>
-                          </TableCell>
-                          <TableCell>
-                            <Link
-                              to={`/admin/customers/${inv.customer_id}`}
-                              className="font-medium text-slate-900 hover:underline"
-                            >
-                              {inv.customers?.business_name}
-                            </Link>
-                          </TableCell>
-                          <TableCell>
-                            <Link
-                              to={`/admin/orders/${inv.order_id}`}
-                              className="font-mono text-xs font-semibold text-blue-700 hover:underline"
-                            >
-                              {inv.orders?.order_number}
-                            </Link>
-                          </TableCell>
-                          <TableCell className="text-xs text-slate-600">
-                            {inv.is_inter_state ? (
-                              <span>IGST: {formatCurrency(inv.igst_amount, sym)}</span>
-                            ) : (
-                              <span>
-                                CGST {formatCurrency(inv.cgst_amount, sym)} + SGST {formatCurrency(inv.sgst_amount, sym)}
-                              </span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <p className="font-semibold text-slate-900">{formatCurrency(inv.total_amount, sym)}</p>
-                            <p className="text-xs text-emerald-700">Paid: {formatCurrency(inv.paid_amount, sym)}</p>
-                          </TableCell>
-                          <TableCell className="font-semibold text-red-700">{formatCurrency(balance, sym)}</TableCell>
-                          <TableCell>
-                            <StatusBadge status={inv.payment_status} />
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <div className="inline-flex items-center gap-1">
-                              {inv.payment_status !== "paid" && (
-                                <Button size="sm" onClick={() => openPaymentModal(inv)}>
-                                  <IndianRupee className="h-3.5 w-3.5" />
-                                  Pay
-                                </Button>
+                          </div>
+                          <StatusBadge status={isOrderCancelled ? "cancelled" : inv.payment_status} />
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <Link
+                            to={`/admin/customers/${inv.customer_id}`}
+                            className="font-medium text-slate-900 hover:underline"
+                          >
+                            {inv.customers?.business_name}
+                          </Link>
+                          <Link
+                            to={`/admin/orders/${inv.order_id}`}
+                            className="font-mono font-semibold text-blue-700 hover:underline"
+                          >
+                            {inv.orders?.order_number}
+                          </Link>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 rounded-md border border-slate-100 bg-slate-50 p-2.5">
+                          <div>
+                            <span className="text-slate-500">Total: </span>
+                            <strong className="text-slate-900">{formatCurrency(inv.total_amount, sym)}</strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Paid: </span>
+                            <strong className="text-emerald-700">{formatCurrency(inv.paid_amount, sym)}</strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Due: </span>
+                            <strong className={isOrderCancelled ? "text-slate-500" : "text-red-700"}>
+                              {isOrderCancelled ? "Void" : formatCurrency(balance, sym)}
+                            </strong>
+                          </div>
+                          <div className="text-slate-600">
+                            {inv.is_inter_state
+                              ? `IGST: ${formatCurrency(inv.igst_amount, sym)}`
+                              : `CGST+SGST: ${formatCurrency(Number(inv.cgst_amount) + Number(inv.sgst_amount), sym)}`}
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          {!isOrderCancelled && inv.payment_status !== "paid" && (
+                            <Button size="sm" onClick={() => openPaymentModal(inv)}>
+                              <IndianRupee className="h-3.5 w-3.5" />
+                              Pay
+                            </Button>
+                          )}
+                          <Button variant="outline" size="sm" onClick={() => setHistoryInvoice(inv)}>
+                            <History className="h-3.5 w-3.5" />
+                            History
+                          </Button>
+                          <Button variant="outline" size="sm" onClick={() => handleDownloadPdf(inv)}>
+                            <FileDown className="h-3.5 w-3.5 text-blue-700" />
+                            PDF
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Invoice #</TableHead>
+                      <TableHead>Customer Business</TableHead>
+                      <TableHead>Order Ref</TableHead>
+                      <TableHead>GST Breakdown</TableHead>
+                      <TableHead>Total / Paid</TableHead>
+                      <TableHead>Balance Due</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {isLoading ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="py-10 text-center text-slate-500">
+                          Loading invoices...
+                        </TableCell>
+                      </TableRow>
+                    ) : filteredInvoices.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="py-10 text-center text-slate-500">
+                          No invoices found.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      filteredInvoices.map((inv) => {
+                        const isOrderCancelled = inv.orders?.order_status === "Cancelled";
+                        const balance = isOrderCancelled
+                          ? 0
+                          : Math.max(0, Number(inv.total_amount) - Number(inv.paid_amount));
+                        return (
+                          <TableRow key={inv.id} className={isOrderCancelled ? "bg-slate-50/70" : undefined}>
+                            <TableCell>
+                              <p className="font-semibold text-slate-900">{inv.invoice_number}</p>
+                              <p className="text-xs text-slate-500">
+                                {formatDate(inv.invoice_date)} &bull; Due {formatDate(inv.due_date)}
+                              </p>
+                            </TableCell>
+                            <TableCell>
+                              <Link
+                                to={`/admin/customers/${inv.customer_id}`}
+                                className="font-medium text-slate-900 hover:underline"
+                              >
+                                {inv.customers?.business_name}
+                              </Link>
+                            </TableCell>
+                            <TableCell>
+                              <Link
+                                to={`/admin/orders/${inv.order_id}`}
+                                className="font-mono text-xs font-semibold text-blue-700 hover:underline"
+                              >
+                                {inv.orders?.order_number}
+                              </Link>
+                            </TableCell>
+                            <TableCell className="text-xs text-slate-600">
+                              {inv.is_inter_state ? (
+                                <span>IGST: {formatCurrency(inv.igst_amount, sym)}</span>
+                              ) : (
+                                <span>
+                                  CGST {formatCurrency(inv.cgst_amount, sym)} + SGST {formatCurrency(inv.sgst_amount, sym)}
+                                </span>
                               )}
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => setHistoryInvoice(inv)}
-                                title="Payment History"
-                              >
-                                <History className="h-4 w-4 text-slate-600" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleDownloadPdf(inv)}
-                                title="Download Tax Invoice PDF"
-                              >
-                                <FileDown className="h-4 w-4 text-blue-700" />
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })
-                  )}
-                </TableBody>
-              </Table>
+                            </TableCell>
+                            <TableCell>
+                              <p className="font-semibold text-slate-900">{formatCurrency(inv.total_amount, sym)}</p>
+                              <p className="text-xs text-emerald-700">Paid: {formatCurrency(inv.paid_amount, sym)}</p>
+                            </TableCell>
+                            <TableCell className={isOrderCancelled ? "text-xs font-medium text-slate-500" : "font-semibold text-red-700"}>
+                              {isOrderCancelled ? "Void" : formatCurrency(balance, sym)}
+                            </TableCell>
+                            <TableCell>
+                              <StatusBadge status={isOrderCancelled ? "cancelled" : inv.payment_status} />
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <div className="inline-flex items-center gap-1">
+                                {!isOrderCancelled && inv.payment_status !== "paid" && (
+                                  <Button size="sm" onClick={() => openPaymentModal(inv)}>
+                                    <IndianRupee className="h-3.5 w-3.5" />
+                                    Pay
+                                  </Button>
+                                )}
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => setHistoryInvoice(inv)}
+                                  title="Payment History"
+                                >
+                                  <History className="h-4 w-4 text-slate-600" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => handleDownloadPdf(inv)}
+                                  title="Download Tax Invoice PDF"
+                                >
+                                  <FileDown className="h-4 w-4 text-blue-700" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -411,60 +516,103 @@ export function InvoicesPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Order #</TableHead>
-                    <TableHead>Customer</TableHead>
-                    <TableHead>Date</TableHead>
-                    <TableHead>Order Status</TableHead>
-                    <TableHead>Amount</TableHead>
-                    <TableHead className="text-right">Action</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {ordersWithoutInvoice.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={6} className="py-8 text-center text-slate-500">
-                        All active orders already have invoices generated.
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    ordersWithoutInvoice.map((o) => {
-                      const custName = (o.customers as unknown as { business_name: string })?.business_name;
-                      return (
-                        <TableRow key={o.id}>
-                          <TableCell>
-                            <Link to={`/admin/orders/${o.id}`} className="font-semibold text-blue-700 hover:underline">
+              <div className="divide-y divide-slate-100 md:hidden">
+                {ordersWithoutInvoice.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-slate-500">All active orders already have invoices generated.</p>
+                ) : (
+                  ordersWithoutInvoice.map((o) => {
+                    const custName = (o.customers as unknown as { business_name: string })?.business_name;
+                    return (
+                      <div key={o.id} className="space-y-2.5 p-4 text-xs">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <Link to={`/admin/orders/${o.id}`} className="text-sm font-semibold text-blue-700 hover:underline">
                               {o.order_number}
                             </Link>
-                          </TableCell>
-                          <TableCell className="font-medium">{custName}</TableCell>
-                          <TableCell className="text-xs text-slate-500">{formatDate(o.placed_at)}</TableCell>
-                          <TableCell>
-                            <StatusBadge status={o.order_status} />
-                          </TableCell>
-                          <TableCell className="font-semibold">{formatCurrency(o.total_amount, sym)}</TableCell>
-                          <TableCell className="text-right">
-                            <Button
-                              size="sm"
-                              disabled={generatingOrderId === o.id}
-                              onClick={() => handleGenerateInvoice(o.id)}
-                            >
-                              {generatingOrderId === o.id ? (
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                              ) : (
-                                <Plus className="h-3.5 w-3.5" />
-                              )}
-                              Generate GST Invoice
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })
-                  )}
-                </TableBody>
-              </Table>
+                            <p className="text-slate-500">{formatDate(o.placed_at)}</p>
+                          </div>
+                          <StatusBadge status={o.order_status} />
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-slate-900">{custName}</span>
+                          <span className="text-sm font-bold text-slate-900">{formatCurrency(o.total_amount, sym)}</span>
+                        </div>
+                        <div className="flex justify-end">
+                          <Button
+                            size="sm"
+                            disabled={generatingOrderId === o.id}
+                            onClick={() => handleGenerateInvoice(o.id)}
+                          >
+                            {generatingOrderId === o.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Plus className="h-3.5 w-3.5" />
+                            )}
+                            Generate GST Invoice
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Order #</TableHead>
+                      <TableHead>Customer</TableHead>
+                      <TableHead>Date</TableHead>
+                      <TableHead>Order Status</TableHead>
+                      <TableHead>Amount</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {ordersWithoutInvoice.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={6} className="py-8 text-center text-slate-500">
+                          All active orders already have invoices generated.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      ordersWithoutInvoice.map((o) => {
+                        const custName = (o.customers as unknown as { business_name: string })?.business_name;
+                        return (
+                          <TableRow key={o.id}>
+                            <TableCell>
+                              <Link to={`/admin/orders/${o.id}`} className="font-semibold text-blue-700 hover:underline">
+                                {o.order_number}
+                              </Link>
+                            </TableCell>
+                            <TableCell className="font-medium">{custName}</TableCell>
+                            <TableCell className="text-xs text-slate-500">{formatDate(o.placed_at)}</TableCell>
+                            <TableCell>
+                              <StatusBadge status={o.order_status} />
+                            </TableCell>
+                            <TableCell className="font-semibold">{formatCurrency(o.total_amount, sym)}</TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                size="sm"
+                                disabled={generatingOrderId === o.id}
+                                onClick={() => handleGenerateInvoice(o.id)}
+                              >
+                                {generatingOrderId === o.id ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  <Plus className="h-3.5 w-3.5" />
+                                )}
+                                Generate GST Invoice
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -475,68 +623,126 @@ export function InvoicesPage() {
               <CardTitle className="text-base">Manufacturer Purchase Documents &amp; Recorded Bills</CardTitle>
             </CardHeader>
             <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>PO Number</TableHead>
-                    <TableHead>Manufacturer</TableHead>
-                    <TableHead>Mfg Invoice #</TableHead>
-                    <TableHead>Mfg Inv Date</TableHead>
-                    <TableHead>PO Total</TableHead>
-                    <TableHead>PO Status</TableHead>
-                    <TableHead className="text-right">Document</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {mfgPos.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={7} className="py-8 text-center text-slate-500">
-                        No purchase orders recorded yet.
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    mfgPos.map((po) => (
-                      <TableRow key={po.id}>
-                        <TableCell>
+              <div className="divide-y divide-slate-100 md:hidden">
+                {mfgPos.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-slate-500">No purchase orders recorded yet.</p>
+                ) : (
+                  mfgPos.map((po) => (
+                    <div key={po.id} className="space-y-2.5 p-4 text-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
                           <Link
                             to={`/admin/purchase-orders/${po.id}`}
-                            className="font-semibold text-blue-700 hover:underline"
+                            className="text-sm font-semibold text-blue-700 hover:underline"
                           >
                             {po.po_number}
                           </Link>
-                        </TableCell>
-                        <TableCell className="font-medium text-slate-900">{po.manufacturers?.company_name}</TableCell>
-                        <TableCell className="font-mono text-xs">{po.manufacturer_invoice_number || "Not logged"}</TableCell>
-                        <TableCell className="text-xs text-slate-500">
-                          {po.manufacturer_invoice_date ? formatDate(po.manufacturer_invoice_date) : "—"}
-                        </TableCell>
-                        <TableCell className="font-semibold">{formatCurrency(po.total_amount, sym)}</TableCell>
-                        <TableCell>
-                          <StatusBadge status={po.status} />
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {po.manufacturer_invoice_url ? (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => openSignedMfgDoc(po.manufacturer_invoice_url!)}
-                            >
-                              View Mfg Bill <ExternalLink className="h-3.5 w-3.5" />
-                            </Button>
-                          ) : (
-                            <Link
-                              to={`/admin/purchase-orders/${po.id}`}
-                              className="text-xs font-medium text-blue-700 hover:underline"
-                            >
-                              Upload in PO
-                            </Link>
-                          )}
+                          <p className="font-medium text-slate-900">{po.manufacturers?.company_name}</p>
+                        </div>
+                        <StatusBadge status={po.status} />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 rounded-md border border-slate-100 bg-slate-50 p-2.5">
+                        <div>
+                          <span className="text-slate-500">Mfg Inv #: </span>
+                          <strong className="font-mono">{po.manufacturer_invoice_number || "Not logged"}</strong>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">PO Total: </span>
+                          <strong className="text-slate-900">{formatCurrency(po.total_amount, sym)}</strong>
+                        </div>
+                        {po.manufacturer_invoice_date && (
+                          <div className="col-span-2 text-slate-500">
+                            Inv Date: {formatDate(po.manufacturer_invoice_date)}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex justify-end">
+                        {po.manufacturer_invoice_url ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => openSignedMfgDoc(po.manufacturer_invoice_url!)}
+                          >
+                            View Mfg Bill <ExternalLink className="h-3.5 w-3.5" />
+                          </Button>
+                        ) : (
+                          <Link
+                            to={`/admin/purchase-orders/${po.id}`}
+                            className="text-xs font-medium text-blue-700 hover:underline"
+                          >
+                            Upload in PO
+                          </Link>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>PO Number</TableHead>
+                      <TableHead>Manufacturer</TableHead>
+                      <TableHead>Mfg Invoice #</TableHead>
+                      <TableHead>Mfg Inv Date</TableHead>
+                      <TableHead>PO Total</TableHead>
+                      <TableHead>PO Status</TableHead>
+                      <TableHead className="text-right">Document</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {mfgPos.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={7} className="py-8 text-center text-slate-500">
+                          No purchase orders recorded yet.
                         </TableCell>
                       </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
+                    ) : (
+                      mfgPos.map((po) => (
+                        <TableRow key={po.id}>
+                          <TableCell>
+                            <Link
+                              to={`/admin/purchase-orders/${po.id}`}
+                              className="font-semibold text-blue-700 hover:underline"
+                            >
+                              {po.po_number}
+                            </Link>
+                          </TableCell>
+                          <TableCell className="font-medium text-slate-900">{po.manufacturers?.company_name}</TableCell>
+                          <TableCell className="font-mono text-xs">{po.manufacturer_invoice_number || "Not logged"}</TableCell>
+                          <TableCell className="text-xs text-slate-500">
+                            {po.manufacturer_invoice_date ? formatDate(po.manufacturer_invoice_date) : "—"}
+                          </TableCell>
+                          <TableCell className="font-semibold">{formatCurrency(po.total_amount, sym)}</TableCell>
+                          <TableCell>
+                            <StatusBadge status={po.status} />
+                          </TableCell>
+                          <TableCell className="text-right">
+                            {po.manufacturer_invoice_url ? (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => openSignedMfgDoc(po.manufacturer_invoice_url!)}
+                              >
+                                View Mfg Bill <ExternalLink className="h-3.5 w-3.5" />
+                              </Button>
+                            ) : (
+                              <Link
+                                to={`/admin/purchase-orders/${po.id}`}
+                                className="text-xs font-medium text-blue-700 hover:underline"
+                              >
+                                Upload in PO
+                              </Link>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>

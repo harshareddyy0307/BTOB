@@ -7,11 +7,22 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-function jsonResponse(body: unknown, status = 200) {
+const EMAIL_RE = /^[^\s@%]+@[^\s@%]+\.[^\s@%]{2,}$/;
+const USERNAME_RE = /^[a-z0-9._-]{3,32}$/;
+
+function jsonResponse(body: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...corsHeaders, "Content-Type": "application/json", ...extraHeaders },
   });
+}
+
+function getClientIp(req: Request): string {
+  const cfIp = req.headers.get("cf-connecting-ip")?.trim();
+  if (cfIp) return cfIp;
+  const xff = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  if (xff) return xff;
+  return req.headers.get("x-real-ip")?.trim() || "unknown";
 }
 
 Deno.serve(async (req: Request) => {
@@ -19,13 +30,26 @@ Deno.serve(async (req: Request) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
-  try {
-    const { identifier, password } = await req.json();
-    const cleanId = String(identifier ?? "").trim().toLowerCase();
-    const rawPassword = String(password ?? "");
+  if (req.method !== "POST") {
+    return jsonResponse({ error: "Method not allowed" }, 405);
+  }
 
-    if (!cleanId || !rawPassword) {
+  try {
+    const body = await req.json().catch(() => null);
+    const cleanId = String(body?.identifier ?? "").trim().toLowerCase();
+    const rawPassword = String(body?.password ?? "");
+
+    if (!cleanId || !rawPassword || cleanId.length > 160) {
       return jsonResponse({ error: "Username/email and password are required" }, 400);
+    }
+
+    const isEmail = cleanId.includes("@");
+    if (isEmail) {
+      if (!EMAIL_RE.test(cleanId) || /[\r\n\t]/.test(cleanId)) {
+        return jsonResponse({ error: "Invalid username/email or password" }, 400);
+      }
+    } else if (!USERNAME_RE.test(cleanId)) {
+      return jsonResponse({ error: "Invalid username/email or password" }, 400);
     }
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
@@ -36,9 +60,26 @@ Deno.serve(async (req: Request) => {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
+    const clientIp = getClientIp(req);
+    const { data: ipRl } = await adminClient.rpc("check_auth_rate_limit", {
+      p_bucket: "username-login-ip",
+      p_key: clientIp,
+      p_max_attempts: 40,
+      p_window_seconds: 900,
+    });
+    const ipLimit = Array.isArray(ipRl) ? ipRl[0] : ipRl;
+    if (ipLimit && ipLimit.allowed === false) {
+      const waitSec = Number(ipLimit.retry_after_seconds || 60);
+      return jsonResponse(
+        { error: `Too many login attempts. Try again in ${waitSec}s.` },
+        429,
+        { "Retry-After": String(waitSec) }
+      );
+    }
+
     const query = adminClient.from("users").select("id, email, is_active");
     const { data: userRow, error: lookupErr } = await (
-      cleanId.includes("@") ? query.ilike("email", cleanId) : query.ilike("username", cleanId)
+      isEmail ? query.eq("email", cleanId) : query.eq("username", cleanId)
     ).maybeSingle();
 
     if (lookupErr || !userRow?.email) {

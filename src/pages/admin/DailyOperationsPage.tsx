@@ -14,10 +14,10 @@ import {
   IndianRupee,
   BellRing,
 } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { supabase, fetchAllRows } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatSignedCurrency } from "@/lib/pricing";
-import { cn, formatCurrency, formatDateTime, formatQty } from "@/lib/utils";
+import { cn, formatCurrency, formatDateTime, formatQty, toLocalDateString } from "@/lib/utils";
 import type { NotificationRecord, OrderStatus, PaymentStatus } from "@/types/database";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -82,16 +82,16 @@ export function DailyOperationsPage() {
 
   const { data: orders = [], isLoading } = useQuery({
     queryKey: ["admin-daily-operations"],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("orders")
-        .select(
-          "id, order_number, customer_id, subtotal, tax_total, total_amount, paid_amount, due_amount, order_status, payment_status, placed_at, customers(id, business_name, owner_name, phone), order_items(id, quantity, product_name_snapshot, order_item_financials(manufacturer_id, manufacturer_name_snapshot, margin_amount_total)), purchase_orders(id, po_number, status, manufacturer_id)"
-        )
-        .order("placed_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as unknown as DailyOrderRow[];
-    },
+    queryFn: async () =>
+      fetchAllRows<DailyOrderRow>((from, to) =>
+        supabase
+          .from("orders")
+          .select(
+            "id, order_number, customer_id, subtotal, tax_total, total_amount, paid_amount, due_amount, order_status, payment_status, placed_at, customers(id, business_name, owner_name, phone), order_items(id, quantity, product_name_snapshot, order_item_financials(manufacturer_id, manufacturer_name_snapshot, margin_amount_total)), purchase_orders(id, po_number, status, manufacturer_id)"
+          )
+          .order("placed_at", { ascending: false })
+          .range(from, to)
+      ),
   });
 
   const { data: paymentClaims = [], refetch: refetchClaims } = useQuery({
@@ -115,12 +115,12 @@ export function DailyOperationsPage() {
     queryClient.invalidateQueries({ queryKey: ["admin-notifications"] });
   };
 
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = toLocalDateString();
 
   const matchesBucket = (o: DailyOrderRow, b: OpBucket) => {
     switch (b) {
       case "today":
-        return o.placed_at.slice(0, 10) === todayIso;
+        return toLocalDateString(o.placed_at) === todayIso;
       case "pending":
         return o.order_status === "Pending";
       case "confirmed":
@@ -223,12 +223,12 @@ export function DailyOperationsPage() {
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Daily Operations</h1>
+          <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">Daily Operations</h1>
           <p className="text-sm text-slate-500">
             Process incoming customer orders, split multi-manufacturer POs, track payment dues, and verify customer payment notices.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Link to="/admin/purchase-orders">
             <Button variant="outline" size="sm">
               <FileSpreadsheet className="h-4 w-4" />
@@ -266,7 +266,7 @@ export function DailyOperationsPage() {
                     <p className="text-xs font-semibold text-slate-900">{claim.title}</p>
                     <p className="text-xs text-slate-600">{claim.message}</p>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
                     {linkedOrder && linkedOrder.order_status !== "Cancelled" && (
                       <Button size="sm" onClick={() => openPaymentForOrder(linkedOrder, parsed)}>
                         Verify &amp; Apply Payment
@@ -331,7 +331,140 @@ export function DailyOperationsPage() {
           />
         </CardHeader>
         <CardContent className="p-0">
-          <Table>
+          <div className="divide-y divide-slate-100 md:hidden">
+            {isLoading ? (
+              <div className="py-10 text-center text-sm text-slate-500">Loading operational queue...</div>
+            ) : filtered.length === 0 ? (
+              <div className="py-10 text-center text-sm text-slate-500">No orders in this operational stage.</div>
+            ) : (
+              filtered.map((o) => {
+                const mfgNames = Array.from(
+                  new Set(
+                    o.order_items
+                      .map((it) => {
+                        const fin = Array.isArray(it.order_item_financials)
+                          ? it.order_item_financials[0]
+                          : it.order_item_financials;
+                        return fin?.manufacturer_name_snapshot;
+                      })
+                      .filter(Boolean) as string[]
+                  )
+                );
+                const totalMargin = o.order_items.reduce((acc, it) => {
+                  const fin = Array.isArray(it.order_item_financials)
+                    ? it.order_item_financials[0]
+                    : it.order_item_financials;
+                  return acc + Number(fin?.margin_amount_total ?? 0);
+                }, 0);
+                const totalUnits = o.order_items.reduce((acc, it) => acc + Number(it.quantity), 0);
+                const activePos = (o.purchase_orders ?? []).filter((po) => po.status !== "Cancelled");
+                const poCount = activePos.length;
+                const coveredMfgCount = new Set(activePos.map((po) => po.manufacturer_id)).size;
+                const canSplit =
+                  o.order_status !== "Cancelled" &&
+                  o.order_status !== "Delivered" &&
+                  coveredMfgCount < mfgNames.length;
+                const busy = busyOrderId === o.id;
+                const paidAmt = Number(o.paid_amount ?? 0);
+                const dueAmt =
+                  o.order_status === "Cancelled" ? 0 : Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - paidAmt));
+
+                return (
+                  <div key={o.id} className="space-y-3 p-4 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <Link to={`/admin/orders/${o.id}`} className="text-sm font-semibold text-blue-700 hover:underline">
+                          {o.order_number}
+                        </Link>
+                        <p className="font-medium text-slate-900">{o.customers?.business_name}</p>
+                        <p className="text-slate-500">
+                          {formatDateTime(o.placed_at)} &bull; {o.order_items.length} SKU(s) ({formatQty(totalUnits)} units)
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap justify-end gap-1">
+                        <StatusBadge status={o.order_status} />
+                        <StatusBadge status={o.payment_status} />
+                      </div>
+                    </div>
+
+                    {mfgNames.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {mfgNames.map((m) => (
+                          <span
+                            key={m}
+                            className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-slate-700"
+                          >
+                            {m}
+                          </span>
+                        ))}
+                        <span className="ml-auto font-medium text-slate-600">
+                          {poCount > 0 ? `${poCount}/${Math.max(1, mfgNames.length)} POs` : "Needs PO"}
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-600">
+                      <span className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</span>
+                      <span className="text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</span>
+                      <span className={cn("font-bold", dueAmt > 0 ? "text-red-700" : "text-slate-500")}>
+                        {o.order_status === "Cancelled" ? "Cancelled" : `Due: ${formatCurrency(dueAmt, sym)}`}
+                      </span>
+                      <span className={totalMargin < 0 ? "font-medium text-red-700" : "text-emerald-700"}>
+                        {formatSignedCurrency(totalMargin, sym)} margin
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-2">
+                      {o.order_status !== "Cancelled" && (
+                        <Button
+                          size="sm"
+                          variant={dueAmt > 0 ? "default" : "outline"}
+                          disabled={busy}
+                          onClick={() => openPaymentForOrder(o)}
+                        >
+                          <IndianRupee className="h-3.5 w-3.5" />
+                          Payment
+                        </Button>
+                      )}
+                      {o.order_status === "Pending" && (
+                        <Button size="sm" disabled={busy} onClick={() => quickStatus(o.id, "Confirmed")}>
+                          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                          Confirm Order
+                        </Button>
+                      )}
+                      {canSplit && o.order_status !== "Pending" && (
+                        <Button size="sm" variant="outline" disabled={busy} onClick={() => quickSplitPo(o.id)}>
+                          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                          Split to POs
+                        </Button>
+                      )}
+                      {["Confirmed", "Processing", "Purchase Order Sent", "Manufacturer Fulfilment Pending"].includes(
+                        o.order_status
+                      ) && (
+                        <Button size="sm" variant="outline" disabled={busy} onClick={() => quickStatus(o.id, "Dispatched")}>
+                          Mark Dispatched
+                        </Button>
+                      )}
+                      {["Dispatched", "Out for Delivery"].includes(o.order_status) && (
+                        <Button size="sm" disabled={busy} onClick={() => quickStatus(o.id, "Delivered")}>
+                          Complete Delivery
+                        </Button>
+                      )}
+                      <Link
+                        to={`/admin/orders/${o.id}`}
+                        className="ml-auto inline-flex h-8 items-center rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        Open
+                      </Link>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Order #</TableHead>
@@ -377,8 +510,13 @@ export function DailyOperationsPage() {
                     return acc + Number(fin?.margin_amount_total ?? 0);
                   }, 0);
                   const totalUnits = o.order_items.reduce((acc, it) => acc + Number(it.quantity), 0);
-                  const poCount = o.purchase_orders?.length ?? 0;
-                  const canSplit = o.order_status !== "Cancelled" && o.order_status !== "Delivered" && poCount < mfgNames.length;
+                  const activePos = (o.purchase_orders ?? []).filter((po) => po.status !== "Cancelled");
+                  const poCount = activePos.length;
+                  const coveredMfgCount = new Set(activePos.map((po) => po.manufacturer_id)).size;
+                  const canSplit =
+                    o.order_status !== "Cancelled" &&
+                    o.order_status !== "Delivered" &&
+                    coveredMfgCount < mfgNames.length;
                   const busy = busyOrderId === o.id;
                   const paidAmt = Number(o.paid_amount ?? 0);
                   const dueAmt = o.order_status === "Cancelled" ? 0 : Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - paidAmt));
@@ -418,6 +556,8 @@ export function DailyOperationsPage() {
                           <span className="font-medium text-emerald-700">
                             {poCount} / {Math.max(1, mfgNames.length)} PO(s)
                           </span>
+                        ) : (o.purchase_orders?.length ?? 0) > 0 ? (
+                          <span className="font-medium text-amber-700">Needs PO (Cancelled)</span>
                         ) : (
                           <span className="font-medium text-amber-700">Needs PO</span>
                         )}
@@ -509,6 +649,7 @@ export function DailyOperationsPage() {
               )}
             </TableBody>
           </Table>
+          </div>
         </CardContent>
       </Card>
 

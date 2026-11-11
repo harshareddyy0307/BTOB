@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ClipboardList, Truck, ArrowRight, Search, CheckCircle2, XCircle, IndianRupee } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { supabase, fetchAllRows } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { cn, formatCurrency, formatDateTime, formatQty } from "@/lib/utils";
 import { ALL_ORDER_STATUSES, ORDER_STATUS_FLOW, type OrderItemRecord, type OrderRecord } from "@/types/database";
@@ -37,17 +37,17 @@ export function CustomerOrdersPage() {
   const { data: orders = [], isLoading } = useQuery({
     queryKey: ["customer-orders", customerProfile?.id],
     enabled: Boolean(customerProfile?.id),
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("orders")
-        .select(
-          "id, order_number, customer_id, delivery_address, notes, subtotal, tax_total, total_amount, paid_amount, due_amount, order_status, payment_status, placed_at, updated_at, order_items(id, product_name_snapshot, sku_snapshot, unit_snapshot, quantity, line_total)"
-        )
-        .eq("customer_id", customerProfile!.id)
-        .order("placed_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as unknown as CustomerOrderWithItems[];
-    },
+    queryFn: async () =>
+      fetchAllRows<CustomerOrderWithItems>((from, to) =>
+        supabase
+          .from("orders")
+          .select(
+            "id, order_number, customer_id, delivery_address, notes, subtotal, tax_total, total_amount, paid_amount, due_amount, order_status, payment_status, placed_at, updated_at, order_items(id, product_name_snapshot, sku_snapshot, unit_snapshot, quantity, line_total)"
+          )
+          .eq("customer_id", customerProfile!.id)
+          .order("placed_at", { ascending: false })
+          .range(from, to)
+      ),
   });
 
   const activeOrders = orders.filter((o) => o.order_status !== "Cancelled");
@@ -78,7 +78,7 @@ export function CustomerOrdersPage() {
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>
-          <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight text-slate-900">
+          <h1 className="flex items-center gap-2 text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
             {isTrackingMode ? <Truck className="h-5 w-5 text-blue-700" /> : <ClipboardList className="h-5 w-5 text-blue-700" />}
             {isTrackingMode ? "Order Tracking & Fulfilment Status" : "My Orders"}
           </h1>
@@ -89,7 +89,7 @@ export function CustomerOrdersPage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             variant={statusFilter === "active_only" ? "default" : "outline"}
             size="sm"
@@ -112,19 +112,19 @@ export function CustomerOrdersPage() {
         <Card>
           <CardContent className="p-4">
             <p className="text-xs font-medium text-slate-500">Total Ordered Value</p>
-            <p className="mt-1 text-2xl font-bold text-slate-900">{formatCurrency(totalOrdered, sym)}</p>
+            <p className="mt-1 text-xl font-bold text-slate-900 sm:text-2xl">{formatCurrency(totalOrdered, sym)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
             <p className="text-xs font-medium text-slate-500">Paid to Date</p>
-            <p className="mt-1 text-2xl font-bold text-emerald-700">{formatCurrency(totalPaid, sym)}</p>
+            <p className="mt-1 text-xl font-bold text-emerald-700 sm:text-2xl">{formatCurrency(totalPaid, sym)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
             <p className="text-xs font-medium text-slate-500">Remaining Amount Due</p>
-            <p className={cn("mt-1 text-2xl font-bold", totalDue > 0 ? "text-red-700" : "text-emerald-700")}>
+            <p className={cn("mt-1 text-xl font-bold sm:text-2xl", totalDue > 0 ? "text-red-700" : "text-emerald-700")}>
               {formatCurrency(totalDue, sym)}
             </p>
           </CardContent>
@@ -183,7 +183,7 @@ export function CustomerOrdersPage() {
 
             return (
               <Card key={o.id}>
-                <CardContent className="space-y-4 p-5">
+                <CardContent className="space-y-4 p-4 sm:p-5">
                   <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
                     <div>
                       <div className="flex flex-wrap items-center gap-2.5">
@@ -237,7 +237,7 @@ export function CustomerOrdersPage() {
                       Order cancelled — reserved stock has been released.
                     </div>
                   ) : (
-                    <div className="grid grid-cols-4 gap-1.5 pt-1 sm:grid-cols-8">
+                    <div className="grid grid-cols-2 gap-2 pt-1 sm:grid-cols-4 lg:grid-cols-8">
                       {ORDER_STATUS_FLOW.map((step, idx) => {
                         const completed = currentIdx >= idx;
                         const active = currentIdx === idx;
@@ -288,94 +288,174 @@ export function CustomerOrdersPage() {
             <CardTitle>Order History ({filtered.length})</CardTitle>
           </CardHeader>
           <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Order ID</TableHead>
-                  <TableHead>Order Date</TableHead>
-                  <TableHead>Product Details</TableHead>
-                  <TableHead>Quantity</TableHead>
-                  <TableHead>Total / Paid</TableHead>
-                  <TableHead>Amount Due</TableHead>
-                  <TableHead>Order Status</TableHead>
-                  <TableHead>Payment</TableHead>
-                  <TableHead className="text-right">Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.map((o) => {
-                  const items = o.order_items ?? [];
-                  const totalQty = items.reduce((s, it) => s + Number(it.quantity), 0);
-                  const previewNames = items.slice(0, 2).map((it) => it.product_name_snapshot).join(", ");
-                  const paidAmt = Number(o.paid_amount ?? 0);
-                  const dueAmt =
-                    o.order_status === "Cancelled"
-                      ? 0
-                      : Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - paidAmt));
+            <div className="divide-y divide-slate-100 md:hidden">
+              {filtered.map((o) => {
+                const items = o.order_items ?? [];
+                const totalQty = items.reduce((s, it) => s + Number(it.quantity), 0);
+                const previewNames = items.slice(0, 2).map((it) => it.product_name_snapshot).join(", ");
+                const paidAmt = Number(o.paid_amount ?? 0);
+                const dueAmt =
+                  o.order_status === "Cancelled"
+                    ? 0
+                    : Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - paidAmt));
 
-                  return (
-                    <TableRow key={o.id}>
-                      <TableCell>
+                return (
+                  <div key={o.id} className="space-y-3 p-4">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
                         <Link to={`/customer/orders/${o.id}`} className="font-semibold text-blue-700 hover:underline">
                           {o.order_number}
                         </Link>
-                      </TableCell>
-                      <TableCell className="text-xs text-slate-600">{formatDateTime(o.placed_at)}</TableCell>
-                      <TableCell className="max-w-xs">
-                        <p className="truncate text-sm font-medium text-slate-900">{previewNames || "—"}</p>
-                        <p className="text-xs text-slate-500">{items.length} SKU(s)</p>
-                      </TableCell>
-                      <TableCell className="text-xs font-medium text-slate-700">{formatQty(totalQty)} units</TableCell>
-                      <TableCell>
-                        <p className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</p>
-                        <p className="text-xs text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</p>
-                      </TableCell>
-                      <TableCell className={cn("text-xs font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
-                        {o.order_status === "Cancelled" ? "—" : formatCurrency(dueAmt, sym)}
-                      </TableCell>
-                      <TableCell>
+                        <p className="text-xs text-slate-500">{formatDateTime(o.placed_at)}</p>
+                      </div>
+                      <div className="flex flex-wrap justify-end gap-1">
                         <StatusBadge status={o.order_status} />
-                      </TableCell>
-                      <TableCell>
                         <StatusBadge status={o.payment_status} />
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="inline-flex items-center justify-end gap-1.5">
-                          {dueAmt > 0 && o.order_status !== "Cancelled" && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() =>
-                                setNoticeOrder({
-                                  id: o.id,
-                                  order_number: o.order_number,
-                                  total_amount: Number(o.total_amount),
-                                  paid_amount: paidAmt,
-                                  due_amount: dueAmt,
-                                })
-                              }
-                            >
-                              Notify Payment
-                            </Button>
-                          )}
-                          <Link
-                            to={`/customer/orders/${o.id}`}
-                            className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      </div>
+                    </div>
+
+                    <div className="text-xs text-slate-600">
+                      <p className="truncate font-medium text-slate-800">{previewNames || "—"}</p>
+                      <p>
+                        {items.length} SKU(s) &bull; {formatQty(totalQty)} units
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2.5">
+                      <div className="text-xs">
+                        <span className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</span>
+                        <span className="mx-1.5 text-slate-300">|</span>
+                        <span className="text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</span>
+                        {o.order_status !== "Cancelled" && (
+                          <>
+                            <span className="mx-1.5 text-slate-300">|</span>
+                            <span className={cn("font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
+                              Due: {formatCurrency(dueAmt, sym)}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {dueAmt > 0 && o.order_status !== "Cancelled" && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() =>
+                              setNoticeOrder({
+                                id: o.id,
+                                order_number: o.order_number,
+                                total_amount: Number(o.total_amount),
+                                paid_amount: paidAmt,
+                                due_amount: dueAmt,
+                              })
+                            }
                           >
-                            {o.order_status === "Delivered" ? (
-                              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-                            ) : (
-                              <Truck className="h-3.5 w-3.5 text-blue-600" />
-                            )}
-                            Track / View
+                            Notify Payment
+                          </Button>
+                        )}
+                        <Link
+                          to={`/customer/orders/${o.id}`}
+                          className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                        >
+                          View
+                        </Link>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="hidden md:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Order ID</TableHead>
+                    <TableHead>Order Date</TableHead>
+                    <TableHead>Product Details</TableHead>
+                    <TableHead>Quantity</TableHead>
+                    <TableHead>Total / Paid</TableHead>
+                    <TableHead>Amount Due</TableHead>
+                    <TableHead>Order Status</TableHead>
+                    <TableHead>Payment</TableHead>
+                    <TableHead className="text-right">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filtered.map((o) => {
+                    const items = o.order_items ?? [];
+                    const totalQty = items.reduce((s, it) => s + Number(it.quantity), 0);
+                    const previewNames = items.slice(0, 2).map((it) => it.product_name_snapshot).join(", ");
+                    const paidAmt = Number(o.paid_amount ?? 0);
+                    const dueAmt =
+                      o.order_status === "Cancelled"
+                        ? 0
+                        : Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - paidAmt));
+
+                    return (
+                      <TableRow key={o.id}>
+                        <TableCell>
+                          <Link to={`/customer/orders/${o.id}`} className="font-semibold text-blue-700 hover:underline">
+                            {o.order_number}
                           </Link>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+                        </TableCell>
+                        <TableCell className="text-xs text-slate-600">{formatDateTime(o.placed_at)}</TableCell>
+                        <TableCell className="max-w-xs">
+                          <p className="truncate text-sm font-medium text-slate-900">{previewNames || "—"}</p>
+                          <p className="text-xs text-slate-500">{items.length} SKU(s)</p>
+                        </TableCell>
+                        <TableCell className="text-xs font-medium text-slate-700">{formatQty(totalQty)} units</TableCell>
+                        <TableCell>
+                          <p className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</p>
+                          <p className="text-xs text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</p>
+                        </TableCell>
+                        <TableCell className={cn("text-xs font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
+                          {o.order_status === "Cancelled" ? "—" : formatCurrency(dueAmt, sym)}
+                        </TableCell>
+                        <TableCell>
+                          <StatusBadge status={o.order_status} />
+                        </TableCell>
+                        <TableCell>
+                          <StatusBadge status={o.payment_status} />
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="inline-flex items-center justify-end gap-1.5">
+                            {dueAmt > 0 && o.order_status !== "Cancelled" && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() =>
+                                  setNoticeOrder({
+                                    id: o.id,
+                                    order_number: o.order_number,
+                                    total_amount: Number(o.total_amount),
+                                    paid_amount: paidAmt,
+                                    due_amount: dueAmt,
+                                  })
+                                }
+                              >
+                                Notify Payment
+                              </Button>
+                            )}
+                            <Link
+                              to={`/customer/orders/${o.id}`}
+                              className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                            >
+                              {o.order_status === "Delivered" ? (
+                                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                              ) : (
+                                <Truck className="h-3.5 w-3.5 text-blue-600" />
+                              )}
+                              Track / View
+                            </Link>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
           </CardContent>
         </Card>
       )}

@@ -1,9 +1,10 @@
 import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Plus, Factory, FolderPlus, Pencil, Trash2, Eye, Upload, Loader2, ArrowLeft } from "lucide-react";
+import { Plus, Factory, FolderPlus, Pencil, Trash2, Eye, Upload, Loader2, ArrowLeft, FileDown } from "lucide-react";
+import { exportAllManufacturersPdf } from "@/lib/adminPdfExports";
 import { supabase } from "@/lib/supabase";
-import { uploadStorageFile } from "@/lib/storage";
+import { RASTER_IMAGE_ACCEPT, uploadStorageFile } from "@/lib/storage";
 import { slugify } from "@/lib/utils";
 import type { Category, Manufacturer } from "@/types/database";
 import { Button } from "@/components/ui/button";
@@ -40,6 +41,7 @@ export function ManufacturersPage() {
   const [editingMfg, setEditingMfg] = useState<ManufacturerWithCats | null>(null);
   const [savingMfg, setSavingMfg] = useState(false);
   const [uploadingLogo, setUploadingLogo] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
 
   const [companyName, setCompanyName] = useState("");
   const [contactPerson, setContactPerson] = useState("");
@@ -232,16 +234,41 @@ export function ManufacturersPage() {
   const countForCategory = (catId: string) =>
     manufacturers.filter((m) => (m.manufacturer_categories ?? []).some((mc) => mc.category_id === catId)).length;
 
+  const handleDownloadAllManufacturersPdf = async () => {
+    if (exportingPdf) return;
+    setExportingPdf(true);
+    try {
+      const res = await exportAllManufacturersPdf();
+      toast({
+        title: "Manufacturers PDF downloaded",
+        description: `Exported ${res.manufacturerCount} manufacturer(s), ${res.productCount} product(s), and ${res.poCount} purchase order(s).`,
+        type: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Could not export Manufacturers PDF",
+        description: err instanceof Error ? err.message : "Error",
+        type: "error",
+      });
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Manufacturer Management</h1>
+          <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">Manufacturer Management</h1>
           <p className="text-sm text-slate-500">
             Internal agency-managed supplier profiles, categories, and catalogs. Manufacturers never log in.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" onClick={handleDownloadAllManufacturersPdf} disabled={exportingPdf}>
+            {exportingPdf ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+            Download All Manufacturers PDF
+          </Button>
           <Button variant="outline" onClick={() => setCatModalOpen(true)}>
             <FolderPlus className="h-4 w-4" />
             Custom Category
@@ -255,7 +282,7 @@ export function ManufacturersPage() {
 
       {/* Mode Switcher */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             variant={viewMode === "categories" && !selectedCategoryId ? "default" : "outline"}
             size="sm"
@@ -346,98 +373,168 @@ export function ManufacturersPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Company</TableHead>
-                  <TableHead>Contact Person</TableHead>
-                  <TableHead>Categories</TableHead>
-                  <TableHead>GST Number</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {isLoading ? (
-                  <TableRow>
-                    <TableCell colSpan={6} className="py-8 text-center text-slate-500">
-                      Loading manufacturers...
-                    </TableCell>
-                  </TableRow>
-                ) : filteredManufacturers.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={6} className="py-8 text-center text-slate-500">
-                      No manufacturers found in this view.
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  filteredManufacturers.map((mfg) => (
-                    <TableRow key={mfg.id}>
-                      <TableCell>
-                        <Link to={`/admin/manufacturers/${mfg.id}`} className="flex items-center gap-3 hover:underline">
-                          {mfg.logo_url ? (
-                            <img src={mfg.logo_url} alt={mfg.company_name} className="h-9 w-9 rounded border object-cover" />
-                          ) : (
-                            <div className="flex h-9 w-9 items-center justify-center rounded border bg-slate-100 text-xs font-bold text-slate-600">
-                              {mfg.company_name.slice(0, 2).toUpperCase()}
-                            </div>
-                          )}
-                          <div>
-                            <p className="font-semibold text-slate-900">{mfg.company_name}</p>
-                            <p className="text-xs text-slate-500">
-                              {[mfg.city, mfg.state].filter(Boolean).join(", ") || mfg.address}
-                            </p>
+            <div className="divide-y divide-slate-100 md:hidden">
+              {isLoading ? (
+                <div className="py-8 text-center text-sm text-slate-500">Loading manufacturers...</div>
+              ) : filteredManufacturers.length === 0 ? (
+                <div className="py-8 text-center text-sm text-slate-500">No manufacturers found in this view.</div>
+              ) : (
+                filteredManufacturers.map((mfg) => (
+                  <div key={mfg.id} className="space-y-3 p-4 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <Link to={`/admin/manufacturers/${mfg.id}`} className="flex min-w-0 flex-1 items-center gap-3">
+                        {mfg.logo_url ? (
+                          <img src={mfg.logo_url} alt={mfg.company_name} className="h-10 w-10 shrink-0 rounded border object-cover" />
+                        ) : (
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded border bg-slate-100 text-xs font-bold text-slate-600">
+                            {mfg.company_name.slice(0, 2).toUpperCase()}
                           </div>
-                        </Link>
-                      </TableCell>
-                      <TableCell>
-                        <p className="text-sm font-medium text-slate-800">{mfg.contact_person}</p>
-                        <p className="text-xs text-slate-500">{mfg.phone}</p>
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex flex-wrap gap-1">
-                          {(mfg.manufacturer_categories ?? []).map((mc) => (
-                            <span
-                              key={mc.category_id}
-                              className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-slate-700"
-                            >
-                              {mc.categories?.name}
-                            </span>
-                          ))}
+                        )}
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-slate-900">{mfg.company_name}</p>
+                          <p className="truncate text-slate-500">
+                            {[mfg.city, mfg.state].filter(Boolean).join(", ") || mfg.address}
+                          </p>
                         </div>
-                      </TableCell>
-                      <TableCell className="text-xs font-mono text-slate-600">{mfg.gst_number || "—"}</TableCell>
-                      <TableCell>
-                        <StatusBadge status={mfg.status} />
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="inline-flex items-center gap-1">
-                          <Link
-                            to={`/admin/manufacturers/${mfg.id}`}
-                            className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      </Link>
+                      <StatusBadge status={mfg.status} />
+                    </div>
+                    <div className="text-slate-600">
+                      <span className="font-medium text-slate-800">{mfg.contact_person}</span> &bull; {mfg.phone}
+                      {mfg.gst_number ? <span className="ml-2 font-mono text-slate-500">GST: {mfg.gst_number}</span> : null}
+                    </div>
+                    {(mfg.manufacturer_categories ?? []).length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {(mfg.manufacturer_categories ?? []).map((mc) => (
+                          <span
+                            key={mc.category_id}
+                            className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-slate-700"
                           >
-                            <Eye className="h-3.5 w-3.5" />
-                            Profile &amp; Products
-                          </Link>
-                          <Button variant="ghost" size="icon" onClick={() => openEditMfg(mfg)} title="Edit">
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleDeleteMfg(mfg)}
-                            className="text-red-600 hover:text-red-700"
-                            title="Delete"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
+                            {mc.categories?.name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex flex-wrap items-center justify-end gap-1.5 border-t border-slate-100 pt-2">
+                      <Link
+                        to={`/admin/manufacturers/${mfg.id}`}
+                        className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        Profile &amp; Products
+                      </Link>
+                      <Button variant="ghost" size="icon" onClick={() => openEditMfg(mfg)} title="Edit">
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleDeleteMfg(mfg)}
+                        className="text-red-600 hover:text-red-700"
+                        title="Delete"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="hidden md:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Company</TableHead>
+                    <TableHead>Contact Person</TableHead>
+                    <TableHead>Categories</TableHead>
+                    <TableHead>GST Number</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {isLoading ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="py-8 text-center text-slate-500">
+                        Loading manufacturers...
                       </TableCell>
                     </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
+                  ) : filteredManufacturers.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="py-8 text-center text-slate-500">
+                        No manufacturers found in this view.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    filteredManufacturers.map((mfg) => (
+                      <TableRow key={mfg.id}>
+                        <TableCell>
+                          <Link to={`/admin/manufacturers/${mfg.id}`} className="flex items-center gap-3 hover:underline">
+                            {mfg.logo_url ? (
+                              <img src={mfg.logo_url} alt={mfg.company_name} className="h-9 w-9 rounded border object-cover" />
+                            ) : (
+                              <div className="flex h-9 w-9 items-center justify-center rounded border bg-slate-100 text-xs font-bold text-slate-600">
+                                {mfg.company_name.slice(0, 2).toUpperCase()}
+                              </div>
+                            )}
+                            <div>
+                              <p className="font-semibold text-slate-900">{mfg.company_name}</p>
+                              <p className="text-xs text-slate-500">
+                                {[mfg.city, mfg.state].filter(Boolean).join(", ") || mfg.address}
+                              </p>
+                            </div>
+                          </Link>
+                        </TableCell>
+                        <TableCell>
+                          <p className="text-sm font-medium text-slate-800">{mfg.contact_person}</p>
+                          <p className="text-xs text-slate-500">{mfg.phone}</p>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap gap-1">
+                            {(mfg.manufacturer_categories ?? []).map((mc) => (
+                              <span
+                                key={mc.category_id}
+                                className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-slate-700"
+                              >
+                                {mc.categories?.name}
+                              </span>
+                            ))}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-xs font-mono text-slate-600">{mfg.gst_number || "—"}</TableCell>
+                        <TableCell>
+                          <StatusBadge status={mfg.status} />
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="inline-flex items-center gap-1">
+                            <Link
+                              to={`/admin/manufacturers/${mfg.id}`}
+                              className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                            >
+                              <Eye className="h-3.5 w-3.5" />
+                              Profile &amp; Products
+                            </Link>
+                            <Button variant="ghost" size="icon" onClick={() => openEditMfg(mfg)} title="Edit">
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleDeleteMfg(mfg)}
+                              className="text-red-600 hover:text-red-700"
+                              title="Delete"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
           </CardContent>
         </Card>
       )}
@@ -545,12 +642,12 @@ export function ManufacturersPage() {
 
             <div className="space-y-1.5">
               <Label>Company Logo</Label>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
                 <Input value={logoUrl} onChange={(e) => setLogoUrl(e.target.value)} placeholder="Logo URL or upload" />
-                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50">
+                <label className="inline-flex shrink-0 cursor-pointer items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50">
                   {uploadingLogo ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
                   <span>Upload</span>
-                  <input type="file" accept="image/*" className="hidden" onChange={handleLogoUpload} />
+                  <input type="file" accept={RASTER_IMAGE_ACCEPT} className="hidden" onChange={handleLogoUpload} />
                 </label>
               </div>
             </div>

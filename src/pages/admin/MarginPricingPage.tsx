@@ -10,7 +10,7 @@ import {
   RefreshCw,
   AlertTriangle,
 } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { fetchAllRows, supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   bulkPublishProducts,
@@ -52,8 +52,14 @@ interface MarginRuleRow {
 
 type ReviewFilter = "all" | "price_updates" | "unpublished_drafts";
 
+const EMPTY_CATEGORIES: Category[] = [];
+const EMPTY_MARGIN_RULES: MarginRuleRow[] = [];
+const EMPTY_PRODUCTS: AdminProduct[] = [];
+const EMPTY_PRICE_HISTORY: never[] = [];
+
 export function MarginPricingPage() {
-  const { userProfile } = useAuth();
+  const { userProfile, branding } = useAuth();
+  const sym = branding.currency_symbol || "₹";
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -71,7 +77,7 @@ export function MarginPricingPage() {
   const [rowBusyId, setRowBusyId] = useState<string | null>(null);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
 
-  const { data: categories = [] } = useQuery({
+  const { data: categories = EMPTY_CATEGORIES } = useQuery({
     queryKey: ["admin-categories"],
     queryFn: async () => {
       const { data } = await supabase.from("categories").select("*").order("name");
@@ -79,7 +85,7 @@ export function MarginPricingPage() {
     },
   });
 
-  const { data: marginRules = [] } = useQuery({
+  const { data: marginRules = EMPTY_MARGIN_RULES } = useQuery({
     queryKey: ["admin-margin-rules"],
     queryFn: async () => {
       const { data, error } = await supabase
@@ -92,19 +98,21 @@ export function MarginPricingPage() {
     },
   });
 
-  const { data: products = [], isLoading } = useQuery({
+  const { data: products = EMPTY_PRODUCTS, isLoading } = useQuery({
     queryKey: ["admin-pricing-products"],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("products")
-        .select("*, manufacturer:manufacturers(id, company_name), category:categories(id, name), product_prices(*)")
-        .order("name");
-      if (error) throw error;
-      return (data ?? []) as unknown as AdminProduct[];
+      return await fetchAllRows<AdminProduct>((from, to) =>
+        supabase
+          .from("products")
+          .select("*, manufacturer:manufacturers(id, company_name), category:categories(id, name), product_prices(*)")
+          .order("name")
+          .order("id", { ascending: true })
+          .range(from, to)
+      );
     },
   });
 
-  const { data: priceHistory = [] } = useQuery({
+  const { data: priceHistory = EMPTY_PRICE_HISTORY } = useQuery({
     queryKey: ["admin-price-history"],
     queryFn: async () => {
       const { data, error } = await supabase
@@ -277,9 +285,12 @@ export function MarginPricingPage() {
     }
   };
 
-  const publishedProducts = products.filter((p) => p.is_published);
-  const publishedPendingProducts = products.filter((p) => isPublishedWithPendingPrice(p));
-  const unpublishedDraftProducts = products.filter((p) => !p.is_published);
+  const publishedProducts = useMemo(() => products.filter((p) => p.is_published), [products]);
+  const publishedPendingProducts = useMemo(
+    () => products.filter((p) => isPublishedWithPendingPrice(p)),
+    [products]
+  );
+  const unpublishedDraftProducts = useMemo(() => products.filter((p) => !p.is_published), [products]);
 
   const displayedProducts = useMemo(() => {
     if (reviewFilter === "price_updates") return publishedPendingProducts;
@@ -290,7 +301,10 @@ export function MarginPricingPage() {
   // Clear stale selections when filter changes
   useEffect(() => {
     const valid = new Set(displayedProducts.map((p) => p.id));
-    setSelectedIds((prev) => prev.filter((id) => valid.has(id)));
+    setSelectedIds((prev) => {
+      const next = prev.filter((id) => valid.has(id));
+      return next.length === prev.length ? prev : next;
+    });
   }, [displayedProducts]);
 
   const handleUpdatePublishedPrices = async (targetProducts: AdminProduct[], onlyPending = true) => {
@@ -302,8 +316,8 @@ export function MarginPricingPage() {
       });
       if (updatedCount === 0 && skippedZeroPriceCount > 0) {
         toast({
-          title: "Cannot update ₹0 price products",
-          description: `${skippedZeroPriceCount} product(s) have a ₹0 draft selling price.`,
+          title: `Cannot update ${sym}0 price products`,
+          description: `${skippedZeroPriceCount} product(s) have a ${sym}0 draft selling price.`,
           type: "error",
         });
         return;
@@ -312,7 +326,7 @@ export function MarginPricingPage() {
         title: `Updated live selling prices for ${updatedCount} published product(s)`,
         description:
           skippedZeroPriceCount > 0
-            ? `Skipped ${skippedZeroPriceCount} ₹0-price item(s). Draft (unpublished) products were kept unpublished.`
+            ? `Skipped ${skippedZeroPriceCount} ${sym}0-price item(s). Draft (unpublished) products were kept unpublished.`
             : "Unpublished draft products remain hidden from customers.",
         type: "success",
       });
@@ -333,15 +347,15 @@ export function MarginPricingPage() {
       const { publishedCount, skippedZeroPriceCount } = await bulkPublishProducts(drafts, queryClient);
       if (publishedCount === 0 && skippedZeroPriceCount > 0) {
         toast({
-          title: "Cannot publish ₹0 price products",
-          description: `${skippedZeroPriceCount} draft product(s) have a ₹0 selling price.`,
+          title: `Cannot publish ${sym}0 price products`,
+          description: `${skippedZeroPriceCount} draft product(s) have a ${sym}0 selling price.`,
           type: "error",
         });
         return;
       }
       toast({
         title: `Published ${publishedCount} draft product(s) to Customer Catalog`,
-        description: skippedZeroPriceCount > 0 ? `Skipped ${skippedZeroPriceCount} ₹0-price product(s).` : undefined,
+        description: skippedZeroPriceCount > 0 ? `Skipped ${skippedZeroPriceCount} ${sym}0-price product(s).` : undefined,
         type: "success",
       });
       setSelectedIds([]);
@@ -356,7 +370,7 @@ export function MarginPricingPage() {
   const handleSingleRowAction = async (p: AdminProduct) => {
     const draftSell = Number(p.product_prices?.draft_selling_price ?? 0);
     if (draftSell <= 0) {
-      toast({ title: "Cannot apply ₹0 selling price", description: "Set a manufacturer price first.", type: "error" });
+      toast({ title: `Cannot apply ${sym}0 selling price`, description: "Set a manufacturer price first.", type: "error" });
       return;
     }
     setRowBusyId(p.id);
@@ -410,7 +424,7 @@ export function MarginPricingPage() {
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-center">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Margin &amp; Pricing Engine</h1>
+          <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">Margin &amp; Pricing Engine</h1>
           <p className="text-sm text-slate-500">
             Gross Margin on Selling Price (<code>Cost ÷ (1 − Margin %)</code>) &bull; Priority:{" "}
             <strong>Product &gt; Category &gt; Global</strong>.
@@ -481,9 +495,9 @@ export function MarginPricingPage() {
                   />
                   {isValidGrossMarginPct(Number(globalPct)) ? (
                     <p className="text-xs text-slate-500">
-                      Preview on ₹100 cost →{" "}
-                      <strong className="text-blue-700">{formatCurrency(globalPreview.sellingPrice)}</strong> selling (
-                      {formatSignedCurrency(globalPreview.marginAmount)} = {globalPreview.marginPercentage}% margin)
+                      Preview on {sym}100 cost →{" "}
+                      <strong className="text-blue-700">{formatCurrency(globalPreview.sellingPrice, sym)}</strong> selling (
+                      {formatSignedCurrency(globalPreview.marginAmount, sym)} = {globalPreview.marginPercentage}% margin)
                     </p>
                   ) : (
                     <p className="text-xs text-red-600">Must be between 0% and 99.99%.</p>
@@ -569,8 +583,8 @@ export function MarginPricingPage() {
                   />
                   {isValidGrossMarginPct(Number(catPct)) ? (
                     <p className="text-xs text-slate-500">
-                      Preview on ₹100 cost →{" "}
-                      <strong className="text-blue-700">{formatCurrency(catPreview.sellingPrice)}</strong> selling
+                      Preview on {sym}100 cost →{" "}
+                      <strong className="text-blue-700">{formatCurrency(catPreview.sellingPrice, sym)}</strong> selling
                     </p>
                   ) : (
                     <p className="text-xs text-red-600">Must be between 0% and 99.99%.</p>
@@ -633,7 +647,7 @@ export function MarginPricingPage() {
                   </Select>
                   {selectedProduct && (
                     <p className="text-xs text-slate-500">
-                      Mfg Cost: <strong>{formatCurrency(selectedProduct.product_prices?.draft_manufacturer_price ?? 0)}</strong>{" "}
+                      Mfg Cost: <strong>{formatCurrency(selectedProduct.product_prices?.draft_manufacturer_price ?? 0, sym)}</strong>{" "}
                       &bull;{" "}
                       {selectedProdRule
                         ? `Product override: ${selectedProdRule.margin_percentage}%`
@@ -657,8 +671,8 @@ export function MarginPricingPage() {
                     (isValidGrossMarginPct(Number(prodPct)) ? (
                       <p className="text-xs text-slate-500">
                         Draft Selling Preview:{" "}
-                        <strong className="text-blue-700">{formatCurrency(prodPreview.sellingPrice)}</strong> (
-                        {formatSignedCurrency(prodPreview.marginAmount)})
+                        <strong className="text-blue-700">{formatCurrency(prodPreview.sellingPrice, sym)}</strong> (
+                        {formatSignedCurrency(prodPreview.marginAmount, sym)})
                       </p>
                     ) : (
                       <p className="text-xs text-red-600">Must be between 0% and 99.99%.</p>
@@ -685,7 +699,42 @@ export function MarginPricingPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              <Table>
+              <div className="divide-y divide-slate-100 md:hidden">
+                {marginRules.map((rule) => (
+                  <div key={rule.id} className="space-y-1.5 p-4 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="rounded bg-slate-100 px-2 py-0.5 font-semibold uppercase text-slate-700">
+                        {rule.scope}
+                      </span>
+                      <span className="text-sm font-bold text-blue-700">{rule.margin_percentage}%</span>
+                    </div>
+                    <p className="font-medium text-slate-900">
+                      {rule.scope === "global"
+                        ? "All Products (Default)"
+                        : rule.scope === "category"
+                        ? rule.categories?.name
+                        : `${rule.products?.name} (${rule.products?.sku})`}
+                    </p>
+                    <p className="text-slate-500">Updated {formatDateTime(rule.updated_at)}</p>
+                    {rule.scope !== "global" && (
+                      <div className="flex justify-end pt-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs text-red-600"
+                          disabled={savingRule}
+                          onClick={() => removeRule(rule)}
+                        >
+                          Remove Override
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Level</TableHead>
@@ -733,6 +782,7 @@ export function MarginPricingPage() {
                   ))}
                 </TableBody>
               </Table>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -795,7 +845,103 @@ export function MarginPricingPage() {
               </div>
             </CardHeader>
             <CardContent className="p-0">
-              <Table>
+              <div className="divide-y divide-slate-100 md:hidden">
+                {isLoading ? (
+                  <p className="py-8 text-center text-sm text-slate-500">Loading pricing sheet...</p>
+                ) : displayedProducts.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-slate-500">No products match the selected filter.</p>
+                ) : (
+                  displayedProducts.map((p) => {
+                    const pr = p.product_prices;
+                    const isLivePricePending = isPublishedWithPendingPrice(p);
+                    const isUnpublished = !p.is_published;
+                    const busy = bulkBusy !== null || rowBusyId === p.id;
+                    return (
+                      <div key={p.id} className="space-y-2.5 p-4 text-xs">
+                        <div className="flex items-start justify-between gap-2">
+                          <label className="flex min-w-0 items-start gap-2.5">
+                            <input
+                              type="checkbox"
+                              className="mt-1 shrink-0"
+                              checked={selectedIds.includes(p.id)}
+                              onChange={() => toggleSelect(p.id)}
+                            />
+                            <div className="min-w-0">
+                              <p className="font-semibold text-slate-900">{p.name}</p>
+                              <p className="text-slate-500">
+                                {p.sku} &bull; {p.category?.name}
+                              </p>
+                            </div>
+                          </label>
+                          <div className="shrink-0">
+                            {isUnpublished ? (
+                              <StatusBadge status="draft" />
+                            ) : isLivePricePending ? (
+                              <StatusBadge status="pending_review" />
+                            ) : (
+                              <StatusBadge status="published" />
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 rounded-md border border-slate-100 bg-slate-50 p-2.5">
+                          <div>
+                            <span className="text-slate-500">Mfg Cost: </span>
+                            <strong className="text-slate-900">
+                              {formatCurrency(pr?.draft_manufacturer_price ?? 0, sym)}
+                            </strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Margin ({pr?.draft_margin_percentage ?? 0}%): </span>
+                            <strong className="text-emerald-700">
+                              {formatSignedCurrency(pr?.draft_margin_amount ?? 0, sym)}
+                            </strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Draft Selling: </span>
+                            <strong className="text-blue-700">
+                              {formatCurrency(pr?.draft_selling_price ?? 0, sym)}
+                            </strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Live Price: </span>
+                            <strong className="text-slate-700">
+                              {p.is_published ? formatCurrency(pr?.published_selling_price ?? 0, sym) : "Unpublished"}
+                            </strong>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="rounded bg-slate-100 px-1.5 py-0.5 font-semibold uppercase text-slate-700">
+                            Rule: {pr?.draft_margin_source || "global"}
+                          </span>
+                          <Button
+                            size="sm"
+                            variant={isUnpublished ? "outline" : isLivePricePending ? "default" : "outline"}
+                            className={
+                              isUnpublished
+                                ? "border-emerald-200 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
+                                : undefined
+                            }
+                            disabled={busy}
+                            onClick={() => handleSingleRowAction(p)}
+                          >
+                            {rowBusyId === p.id && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                            {isUnpublished
+                              ? "Publish to Catalog"
+                              : isLivePricePending
+                              ? "Update Live Price"
+                              : "Re-sync Live"}
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-10">
@@ -852,7 +998,7 @@ export function MarginPricingPage() {
                             </p>
                           </TableCell>
                           <TableCell className="font-medium">
-                            {formatCurrency(pr?.draft_manufacturer_price ?? 0)}
+                            {formatCurrency(pr?.draft_manufacturer_price ?? 0, sym)}
                           </TableCell>
                           <TableCell className="text-xs">
                             <span className="rounded bg-slate-100 px-1.5 py-0.5 font-semibold uppercase text-slate-700">
@@ -861,13 +1007,13 @@ export function MarginPricingPage() {
                             {pr?.draft_margin_percentage ?? 0}%
                           </TableCell>
                           <TableCell className="font-medium text-emerald-700">
-                            {formatSignedCurrency(pr?.draft_margin_amount ?? 0)}
+                            {formatSignedCurrency(pr?.draft_margin_amount ?? 0, sym)}
                           </TableCell>
                           <TableCell className="font-semibold text-blue-700">
-                            {formatCurrency(pr?.draft_selling_price ?? 0)}
+                            {formatCurrency(pr?.draft_selling_price ?? 0, sym)}
                           </TableCell>
                           <TableCell className="text-slate-600">
-                            {p.is_published ? formatCurrency(pr?.published_selling_price ?? 0) : "Unpublished"}
+                            {p.is_published ? formatCurrency(pr?.published_selling_price ?? 0, sym) : "Unpublished"}
                           </TableCell>
                           <TableCell>
                             {isUnpublished ? (
@@ -904,6 +1050,7 @@ export function MarginPricingPage() {
                   )}
                 </TableBody>
               </Table>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -918,7 +1065,52 @@ export function MarginPricingPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="p-0">
-              <Table>
+              <div className="divide-y divide-slate-100 md:hidden">
+                {priceHistory.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-slate-500">No price change history recorded yet.</p>
+                ) : (
+                  priceHistory.map((h) => {
+                    const prod = h.products as unknown as { name: string; sku: string };
+                    return (
+                      <div key={h.id} className="space-y-2 p-4 text-xs">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="font-semibold text-slate-900">{prod?.name}</p>
+                            <p className="font-mono text-slate-500">{prod?.sku}</p>
+                          </div>
+                          <div className="shrink-0">
+                            <StatusBadge status={h.action === "approved_published" ? "published" : "pending_review"} />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-1.5 rounded-md border border-slate-100 bg-slate-50 p-2.5 sm:grid-cols-3">
+                          <div>
+                            <span className="text-slate-500">Mfg Price: </span>
+                            {h.old_manufacturer_price != null ? `${formatCurrency(h.old_manufacturer_price, sym)} → ` : ""}
+                            <strong>{formatCurrency(h.new_manufacturer_price, sym)}</strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Margin: </span>
+                            {h.old_margin_percentage != null ? `${h.old_margin_percentage}% → ` : ""}
+                            <strong>{h.new_margin_percentage}%</strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Selling: </span>
+                            {h.old_selling_price != null ? `${formatCurrency(h.old_selling_price, sym)} → ` : ""}
+                            <strong className="text-blue-700">{formatCurrency(h.new_selling_price, sym)}</strong>
+                          </div>
+                        </div>
+
+                        {h.notes && <p className="text-slate-600">{h.notes}</p>}
+                        <p className="text-[11px] text-slate-400">{formatDateTime(h.created_at)}</p>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Timestamp</TableHead>
@@ -944,16 +1136,16 @@ export function MarginPricingPage() {
                           <StatusBadge status={h.action === "approved_published" ? "published" : "pending_review"} />
                         </TableCell>
                         <TableCell className="text-xs">
-                          {h.old_manufacturer_price != null ? `${formatCurrency(h.old_manufacturer_price)} → ` : ""}
-                          <strong>{formatCurrency(h.new_manufacturer_price)}</strong>
+                          {h.old_manufacturer_price != null ? `${formatCurrency(h.old_manufacturer_price, sym)} → ` : ""}
+                          <strong>{formatCurrency(h.new_manufacturer_price, sym)}</strong>
                         </TableCell>
                         <TableCell className="text-xs">
                           {h.old_margin_percentage != null ? `${h.old_margin_percentage}% → ` : ""}
                           <strong>{h.new_margin_percentage}%</strong>
                         </TableCell>
                         <TableCell className="text-xs">
-                          {h.old_selling_price != null ? `${formatCurrency(h.old_selling_price)} → ` : ""}
-                          <strong className="text-blue-700">{formatCurrency(h.new_selling_price)}</strong>
+                          {h.old_selling_price != null ? `${formatCurrency(h.old_selling_price, sym)} → ` : ""}
+                          <strong className="text-blue-700">{formatCurrency(h.new_selling_price, sym)}</strong>
                         </TableCell>
                         <TableCell className="text-xs text-slate-500">{h.notes || "—"}</TableCell>
                       </TableRow>
@@ -961,6 +1153,7 @@ export function MarginPricingPage() {
                   })}
                 </TableBody>
               </Table>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>

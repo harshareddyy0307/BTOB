@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clock, Loader2, RotateCcw } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
-import { cn, formatCurrency } from "@/lib/utils";
+import { cn, formatCurrency, toLocalDateString } from "@/lib/utils";
 import {
   PAYMENT_METHODS,
   type OrderStatus,
@@ -68,7 +68,7 @@ export function OrderPaymentModal({ order, prefill, onClose }: OrderPaymentModal
   const [partialAmount, setPartialAmount] = useState("");
   const [method, setMethod] = useState<PaymentMethod>("Bank Transfer");
   const [reference, setReference] = useState("");
-  const [paymentDate, setPaymentDate] = useState(new Date().toISOString().slice(0, 10));
+  const [paymentDate, setPaymentDate] = useState(toLocalDateString());
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -94,7 +94,7 @@ export function OrderPaymentModal({ order, prefill, onClose }: OrderPaymentModal
 
     setMethod(prefill?.method ?? "Bank Transfer");
     setReference(prefill?.reference ?? "");
-    setPaymentDate(new Date().toISOString().slice(0, 10));
+    setPaymentDate(toLocalDateString());
     setNotes(prefill?.notes ?? (paid > 0 && due <= 0 ? "" : ""));
   }, [order, prefill]);
 
@@ -185,13 +185,13 @@ export function OrderPaymentModal({ order, prefill, onClose }: OrderPaymentModal
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Financial Summary Strip */}
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-xs font-medium text-slate-600">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="min-w-0 text-xs font-medium text-slate-600">
                   Customer: <strong className="text-slate-900">{order.customer_name}</strong>
                 </p>
                 <StatusBadge status={order.payment_status} />
               </div>
-              <div className="grid grid-cols-3 gap-2 border-t border-slate-200 pt-2.5 text-xs">
+              <div className="grid grid-cols-1 gap-2 border-t border-slate-200 pt-2.5 text-xs sm:grid-cols-3">
                 <div>
                   <p className="text-slate-500">Order Total</p>
                   <p className="font-bold text-slate-900">{formatCurrency(totalAmount, sym)}</p>
@@ -218,7 +218,7 @@ export function OrderPaymentModal({ order, prefill, onClose }: OrderPaymentModal
                 {/* 3 Payment Action Selector */}
                 <div className="space-y-1.5">
                   <Label className="text-xs uppercase tracking-wider text-slate-500">Select Payment Status / Action</Label>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                     <button
                       type="button"
                       disabled={currentDue <= 0}

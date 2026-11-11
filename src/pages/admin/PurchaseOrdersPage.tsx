@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileSpreadsheet, Plus, Search, Trash2, Loader2, Eye, FileDown } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { supabase, fetchAllRows } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { generatePurchaseOrderPdf } from "@/lib/pdfGenerator";
 import { formatCurrency, formatDate } from "@/lib/utils";
@@ -26,6 +26,7 @@ import { StatusBadge } from "@/components/shared/StatusBadge";
 import { useToast } from "@/components/ui/toast";
 
 interface DraftPoLine {
+  uid: string;
   product_id: string;
   quantity: string;
   unit_manufacturer_price: string;
@@ -52,41 +53,37 @@ export function PurchaseOrdersPage() {
 
   const { data: purchaseOrders = [], isLoading } = useQuery({
     queryKey: ["admin-purchase-orders"],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("purchase_orders")
-        .select("*, manufacturers(*), orders(id, order_number, order_status)")
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as unknown as PurchaseOrderRecord[];
-    },
+    queryFn: async () =>
+      fetchAllRows<PurchaseOrderRecord>((from, to) =>
+        supabase
+          .from("purchase_orders")
+          .select("*, manufacturers(*), orders(id, order_number, order_status)")
+          .order("created_at", { ascending: false })
+          .range(from, to)
+      ),
   });
 
   const { data: manufacturers = [] } = useQuery({
     queryKey: ["admin-manufacturers-active-po"],
-    queryFn: async () => {
-      const { data } = await supabase
-        .from("manufacturers")
-        .select("*")
-        .eq("status", "active")
-        .order("company_name");
-      return (data ?? []) as Manufacturer[];
-    },
+    queryFn: async () =>
+      fetchAllRows<Manufacturer>((from, to) =>
+        supabase.from("manufacturers").select("*").eq("status", "active").order("company_name").range(from, to)
+      ),
   });
 
   const { data: mfgProducts = [] } = useQuery({
     queryKey: ["admin-po-mfg-products", selectedMfgId],
     enabled: Boolean(createOpen && selectedMfgId),
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("products")
-        .select("*, product_prices(*)")
-        .eq("manufacturer_id", selectedMfgId)
-        .eq("status", "active")
-        .order("name");
-      if (error) throw error;
-      return (data ?? []) as unknown as AdminProduct[];
-    },
+    queryFn: async () =>
+      fetchAllRows<AdminProduct>((from, to) =>
+        supabase
+          .from("products")
+          .select("*, product_prices(*)")
+          .eq("manufacturer_id", selectedMfgId)
+          .eq("status", "active")
+          .order("name")
+          .range(from, to)
+      ),
   });
 
   const { data: agency } = useQuery({
@@ -118,9 +115,14 @@ export function PurchaseOrdersPage() {
       return;
     }
     const defaultCost = unused.product_prices?.draft_manufacturer_price ?? unused.product_prices?.published_manufacturer_price ?? 0;
+    const uid =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     setLines((prev) => [
       ...prev,
       {
+        uid,
         product_id: unused.id,
         quantity: String(unused.min_order_quantity || 1),
         unit_manufacturer_price: String(defaultCost),
@@ -199,7 +201,14 @@ export function PurchaseOrdersPage() {
   };
 
   const handleDownloadPdf = async (po: PurchaseOrderRecord) => {
-    if (!agency || !po.manufacturers) return;
+    if (!agency || !po.manufacturers) {
+      toast({
+        title: "Cannot generate PO PDF",
+        description: !agency ? "Agency settings are still loading." : "Manufacturer record is missing.",
+        type: "error",
+      });
+      return;
+    }
     const { data: items, error } = await supabase
       .from("purchase_order_items")
       .select("*")
@@ -235,12 +244,12 @@ export function PurchaseOrdersPage() {
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Purchase Orders</h1>
+          <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">Purchase Orders</h1>
           <p className="text-sm text-slate-500">
             Internal manufacturer procurement documents (at original cost prices). Staff manage all supplier updates manually.
           </p>
         </div>
-        <Button onClick={openManualModal}>
+        <Button className="w-full sm:w-auto" onClick={openManualModal}>
           <Plus className="h-4 w-4" />
           Generate Manual Purchase Order
         </Button>
@@ -297,92 +306,170 @@ export function PurchaseOrdersPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>PO Number</TableHead>
-                <TableHead>Manufacturer</TableHead>
-                <TableHead>Source Order</TableHead>
-                <TableHead>Mfg Invoice</TableHead>
-                <TableHead>PO Total (Cost)</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {isLoading ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="py-10 text-center text-slate-500">
-                    Loading purchase orders...
-                  </TableCell>
-                </TableRow>
-              ) : filtered.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="py-10 text-center text-slate-500">
-                    No purchase orders found. Split a customer order or click &ldquo;Generate Manual Purchase Order&rdquo;.
-                  </TableCell>
-                </TableRow>
-              ) : (
-                filtered.map((po) => (
-                  <TableRow key={po.id}>
-                    <TableCell>
-                      <Link to={`/admin/purchase-orders/${po.id}`} className="font-semibold text-blue-700 hover:underline">
+          <div className="divide-y divide-slate-100 md:hidden">
+            {isLoading ? (
+              <p className="py-10 text-center text-sm text-slate-500">Loading purchase orders...</p>
+            ) : filtered.length === 0 ? (
+              <p className="px-4 py-10 text-center text-sm text-slate-500">
+                No purchase orders found. Split a customer order or click &ldquo;Generate Manual Purchase Order&rdquo;.
+              </p>
+            ) : (
+              filtered.map((po) => (
+                <div key={po.id} className="space-y-2.5 p-4 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <Link
+                        to={`/admin/purchase-orders/${po.id}`}
+                        className="text-sm font-semibold text-blue-700 hover:underline"
+                      >
                         {po.po_number}
                       </Link>
-                      <p className="text-xs text-slate-500">{formatDate(po.created_at)}</p>
-                    </TableCell>
-                    <TableCell>
-                      <Link
-                        to={`/admin/manufacturers/${po.manufacturer_id}`}
-                        className="font-medium text-slate-900 hover:underline"
-                      >
-                        {po.manufacturers?.company_name}
-                      </Link>
-                    </TableCell>
-                    <TableCell className="text-xs">
+                      <p className="text-slate-500">{formatDate(po.created_at)}</p>
+                    </div>
+                    <StatusBadge status={po.status} />
+                  </div>
+
+                  <div>
+                    <Link
+                      to={`/admin/manufacturers/${po.manufacturer_id}`}
+                      className="text-sm font-medium text-slate-900 hover:underline"
+                    >
+                      {po.manufacturers?.company_name}
+                    </Link>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-100 bg-slate-50 p-2.5">
+                    <div>
+                      <span className="text-slate-500">Source: </span>
                       {po.orders ? (
                         <Link to={`/admin/orders/${po.orders.id}`} className="font-mono font-semibold text-blue-700 hover:underline">
                           {po.orders.order_number}
                         </Link>
                       ) : (
-                        <span className="text-slate-500">Manual Restock</span>
+                        <span className="text-slate-600">Manual Restock</span>
                       )}
-                    </TableCell>
-                    <TableCell className="text-xs text-slate-600">
-                      {po.manufacturer_invoice_number ? (
-                        <span className="font-mono font-medium text-slate-800">{po.manufacturer_invoice_number}</span>
-                      ) : (
-                        "—"
+                      {po.manufacturer_invoice_number && (
+                        <p className="mt-0.5 text-slate-500">
+                          Mfg Inv: <span className="font-mono text-slate-700">{po.manufacturer_invoice_number}</span>
+                        </p>
                       )}
-                    </TableCell>
-                    <TableCell className="font-semibold text-slate-900">{formatCurrency(po.total_amount, sym)}</TableCell>
-                    <TableCell>
-                      <StatusBadge status={po.status} />
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="inline-flex items-center gap-1.5">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleDownloadPdf(po)}
-                          title="Download PO PDF"
-                        >
-                          <FileDown className="h-4 w-4 text-slate-600" />
-                        </Button>
-                        <Link
-                          to={`/admin/purchase-orders/${po.id}`}
-                          className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                        >
-                          <Eye className="h-3.5 w-3.5" />
-                          Manage
-                        </Link>
-                      </div>
+                    </div>
+                    <div className="text-right">
+                      <span className="block text-[11px] text-slate-500">PO Total</span>
+                      <span className="text-sm font-bold text-slate-900">{formatCurrency(po.total_amount, sym)}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleDownloadPdf(po)}
+                    >
+                      <FileDown className="h-3.5 w-3.5 text-slate-600" />
+                      PO PDF
+                    </Button>
+                    <Link
+                      to={`/admin/purchase-orders/${po.id}`}
+                      className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                      Manage
+                    </Link>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>PO Number</TableHead>
+                  <TableHead>Manufacturer</TableHead>
+                  <TableHead>Source Order</TableHead>
+                  <TableHead>Mfg Invoice</TableHead>
+                  <TableHead>PO Total (Cost)</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {isLoading ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="py-10 text-center text-slate-500">
+                      Loading purchase orders...
                     </TableCell>
                   </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
+                ) : filtered.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="py-10 text-center text-slate-500">
+                      No purchase orders found. Split a customer order or click &ldquo;Generate Manual Purchase Order&rdquo;.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  filtered.map((po) => (
+                    <TableRow key={po.id}>
+                      <TableCell>
+                        <Link to={`/admin/purchase-orders/${po.id}`} className="font-semibold text-blue-700 hover:underline">
+                          {po.po_number}
+                        </Link>
+                        <p className="text-xs text-slate-500">{formatDate(po.created_at)}</p>
+                      </TableCell>
+                      <TableCell>
+                        <Link
+                          to={`/admin/manufacturers/${po.manufacturer_id}`}
+                          className="font-medium text-slate-900 hover:underline"
+                        >
+                          {po.manufacturers?.company_name}
+                        </Link>
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        {po.orders ? (
+                          <Link to={`/admin/orders/${po.orders.id}`} className="font-mono font-semibold text-blue-700 hover:underline">
+                            {po.orders.order_number}
+                          </Link>
+                        ) : (
+                          <span className="text-slate-500">Manual Restock</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-xs text-slate-600">
+                        {po.manufacturer_invoice_number ? (
+                          <span className="font-mono font-medium text-slate-800">{po.manufacturer_invoice_number}</span>
+                        ) : (
+                          "—"
+                        )}
+                      </TableCell>
+                      <TableCell className="font-semibold text-slate-900">{formatCurrency(po.total_amount, sym)}</TableCell>
+                      <TableCell>
+                        <StatusBadge status={po.status} />
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="inline-flex items-center gap-1.5">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleDownloadPdf(po)}
+                            title="Download PO PDF"
+                          >
+                            <FileDown className="h-4 w-4 text-slate-600" />
+                          </Button>
+                          <Link
+                            to={`/admin/purchase-orders/${po.id}`}
+                            className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            Manage
+                          </Link>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 
@@ -416,7 +503,7 @@ export function PurchaseOrdersPage() {
             </div>
 
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <Label>Products from Manufacturer</Label>
                 <Button type="button" variant="outline" size="sm" onClick={addDraftLine} disabled={!selectedMfgId}>
                   <Plus className="h-3.5 w-3.5" />
@@ -431,17 +518,20 @@ export function PurchaseOrdersPage() {
                     : "Click \"Add Product Line\" to include items in this Purchase Order."}
                 </p>
               ) : (
-                <div className="space-y-2">
+                <div className="space-y-2.5">
                   {lines.map((line, idx) => {
                     const prod = productMap.get(line.product_id);
                     const sub = (Number(line.quantity) || 0) * (Number(line.unit_manufacturer_price) || 0);
                     return (
-                      <div key={idx} className="grid grid-cols-12 items-center gap-2 rounded-md border bg-slate-50/70 p-2">
-                        <div className="col-span-5">
+                      <div
+                        key={line.uid}
+                        className="grid grid-cols-2 items-center gap-2 rounded-md border bg-slate-50/70 p-2.5 sm:grid-cols-12 sm:p-2"
+                      >
+                        <div className="col-span-2 sm:col-span-5">
                           <select
                             value={line.product_id}
                             onChange={(e) => updateLine(idx, { product_id: e.target.value })}
-                            className="h-9 w-full rounded-md border border-input bg-white px-2 text-xs"
+                            className="h-9 w-full min-w-0 rounded-md border border-input bg-white px-2 text-xs"
                           >
                             {mfgProducts.map((p) => (
                               <option key={p.id} value={p.id}>
@@ -450,7 +540,8 @@ export function PurchaseOrdersPage() {
                             ))}
                           </select>
                         </div>
-                        <div className="col-span-2">
+                        <div className="sm:col-span-2">
+                          <span className="mb-1 block text-[11px] font-medium text-slate-500 sm:hidden">Qty</span>
                           <Input
                             type="number"
                             step="0.01"
@@ -462,7 +553,8 @@ export function PurchaseOrdersPage() {
                             required
                           />
                         </div>
-                        <div className="col-span-2">
+                        <div className="sm:col-span-2">
+                          <span className="mb-1 block text-[11px] font-medium text-slate-500 sm:hidden">Mfg Price</span>
                           <Input
                             type="number"
                             step="0.01"
@@ -474,11 +566,11 @@ export function PurchaseOrdersPage() {
                             required
                           />
                         </div>
-                        <div className="col-span-2 text-right text-xs font-semibold text-slate-800">
-                          {formatCurrency(sub, sym)}
-                          <span className="block text-[10px] font-normal text-slate-500">+{prod?.gst_rate ?? 0}% GST</span>
-                        </div>
-                        <div className="col-span-1 text-right">
+                        <div className="flex items-center justify-between sm:col-span-3 sm:justify-end sm:gap-2">
+                          <div className="text-left text-xs font-semibold text-slate-800 sm:text-right">
+                            {formatCurrency(sub, sym)}
+                            <span className="block text-[10px] font-normal text-slate-500">+{prod?.gst_rate ?? 0}% GST</span>
+                          </div>
                           <Button type="button" variant="ghost" size="icon" className="text-red-600" onClick={() => removeLine(idx)}>
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>
@@ -495,8 +587,8 @@ export function PurchaseOrdersPage() {
               <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="Packaging, delivery warehouse address, credit terms..." />
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-4 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm">
-              <div className="space-x-4 text-xs text-slate-600">
+            <div className="flex flex-col gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-4">
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
                 <span>Subtotal: {formatCurrency(draftSub, sym)}</span>
                 <span>GST: {formatCurrency(draftTax, sym)}</span>
               </div>

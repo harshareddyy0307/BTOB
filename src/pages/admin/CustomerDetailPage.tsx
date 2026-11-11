@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, Trash2, Loader2, IndianRupee, Power, CheckCircle2, XCircle, Clock, AlertTriangle } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Loader2, IndianRupee, Power, CheckCircle2, XCircle, Clock, AlertTriangle, FileDown } from "lucide-react";
+import { exportSingleCustomerPdf } from "@/lib/adminPdfExports";
 import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { calculateRealizedGrossMargin, formatSignedCurrency } from "@/lib/pricing";
@@ -29,6 +30,7 @@ export function CustomerDetailPage() {
   const [customPrice, setCustomPrice] = useState("");
   const [savingOverride, setSavingOverride] = useState(false);
   const [togglingStatus, setTogglingStatus] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
   const [paymentOrder, setPaymentOrder] = useState<OrderPaymentTarget | null>(null);
 
   const { data: customer, isLoading } = useQuery({
@@ -99,7 +101,7 @@ export function CustomerDetailPage() {
   );
   const parsedCustomPrice = customPrice !== "" ? Number(customPrice) : NaN;
   const previewRealizedMargin =
-    selectedCustomProduct && Number.isFinite(parsedCustomPrice) && parsedCustomPrice >= 0
+    selectedCustomProduct && Number.isFinite(parsedCustomPrice) && parsedCustomPrice > 0
       ? calculateRealizedGrossMargin(parsedCustomPrice, selectedCostPrice)
       : null;
 
@@ -107,8 +109,8 @@ export function CustomerDetailPage() {
     e.preventDefault();
     if (!id || !selectedProdId || !customPrice) return;
     const priceNum = Number(customPrice);
-    if (!Number.isFinite(priceNum) || priceNum < 0) {
-      toast({ title: "Enter a valid non-negative selling price", type: "error" });
+    if (!Number.isFinite(priceNum) || priceNum <= 0) {
+      toast({ title: "Enter a valid selling price greater than 0", type: "error" });
       return;
     }
     setSavingOverride(true);
@@ -198,6 +200,7 @@ export function CustomerDetailPage() {
   if (isLoading) return <div className="py-12 text-center text-sm text-slate-500">Loading customer profile...</div>;
   if (!customer) return <div className="py-12 text-center text-sm text-red-600">Customer not found.</div>;
 
+  const cancelledOrderIds = new Set(orders.filter((o) => o.order_status === "Cancelled").map((o) => o.id));
   const activeOrders = orders.filter((o) => o.order_status !== "Cancelled");
   const totalOrdered = activeOrders.reduce((acc, o) => acc + Number(o.total_amount), 0);
   const totalPaid = activeOrders.reduce((acc, o) => acc + Number(o.paid_amount ?? 0), 0);
@@ -206,6 +209,27 @@ export function CustomerDetailPage() {
     0
   );
 
+  const handleDownloadCustomerPdf = async () => {
+    if (!id || exportingPdf) return;
+    setExportingPdf(true);
+    try {
+      const res = await exportSingleCustomerPdf(id);
+      toast({
+        title: "Customer Profile PDF downloaded",
+        description: `Exported complete profile & ${res.orderCount} order(s) for ${res.businessName}.`,
+        type: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Could not export Customer PDF",
+        description: err instanceof Error ? err.message : "Error",
+        type: "error",
+      });
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -213,7 +237,11 @@ export function CustomerDetailPage() {
           <ArrowLeft className="h-4 w-4" />
           Back to Customers
         </Link>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleDownloadCustomerPdf} disabled={exportingPdf}>
+            {exportingPdf ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileDown className="h-3.5 w-3.5" />}
+            Download Customer PDF
+          </Button>
           <StatusBadge status={customer.status} />
           {customer.status === "pending" ? (
             <>
@@ -259,7 +287,7 @@ export function CustomerDetailPage() {
               </p>
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex flex-wrap shrink-0 items-center gap-2">
             <Button
               size="sm"
               onClick={() => void updateCustomerAccess(true)}
@@ -278,14 +306,14 @@ export function CustomerDetailPage() {
       )}
 
       <Card>
-        <CardContent className="grid gap-6 p-6 md:grid-cols-3">
-          <div className="md:col-span-2">
-            <h1 className="text-2xl font-bold text-slate-900">{customer.business_name}</h1>
+        <CardContent className="grid gap-4 p-4 sm:gap-6 sm:p-6 md:grid-cols-3">
+          <div className="min-w-0 md:col-span-2">
+            <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">{customer.business_name}</h1>
             <p className="mt-1 text-sm text-slate-600">
               Owner: <strong>{customer.owner_name}</strong> &bull; {customer.business_category || "Local Business"}
             </p>
             <div className="mt-4 grid gap-2 text-xs text-slate-600 sm:grid-cols-2">
-              <p>Email: {customer.email}</p>
+              <p className="break-all">Email: {customer.email}</p>
               <p>Phone: {customer.phone}</p>
               <p>GSTIN: {customer.gst_number || "—"}</p>
               <p>Registered: {formatDate(customer.registered_at)}</p>
@@ -321,7 +349,7 @@ export function CustomerDetailPage() {
           <CardTitle>Customer-Specific Selling Prices (Optional)</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <form onSubmit={addCustomPrice} className="grid items-end gap-3 sm:grid-cols-4">
+          <form onSubmit={addCustomPrice} className="grid grid-cols-1 items-end gap-3 sm:grid-cols-4">
             <div className="space-y-1.5 sm:col-span-2">
               <Label>Published Product</Label>
               <Select value={selectedProdId} onValueChange={setSelectedProdId}>
@@ -339,7 +367,7 @@ export function CustomerDetailPage() {
             </div>
             <div className="space-y-1.5">
               <Label>Custom Price ({sym})</Label>
-              <Input type="number" step="0.01" min="0" value={customPrice} onChange={(e) => setCustomPrice(e.target.value)} required />
+              <Input type="number" step="0.01" min="0.01" value={customPrice} onChange={(e) => setCustomPrice(e.target.value)} required />
             </div>
             <Button type="submit" disabled={savingOverride || !selectedProdId}>
               {savingOverride ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
@@ -376,18 +404,8 @@ export function CustomerDetailPage() {
           )}
 
           {customPrices.length > 0 && (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Product</TableHead>
-                  <TableHead>Mfg Cost (Admin)</TableHead>
-                  <TableHead>Standard Catalog Price</TableHead>
-                  <TableHead>Custom Customer Price</TableHead>
-                  <TableHead>Realized Margin</TableHead>
-                  <TableHead className="text-right">Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
+            <>
+              <div className="divide-y divide-slate-100 rounded-md border border-slate-200 md:hidden">
                 {customPrices.map((cp) => {
                   const prod = cp.products as unknown as {
                     name: string;
@@ -405,32 +423,87 @@ export function CustomerDetailPage() {
                   );
                   const realized = calculateRealizedGrossMargin(Number(cp.custom_selling_price), costPrice);
                   return (
-                    <TableRow key={cp.id}>
-                      <TableCell>
-                        <p className="font-medium">{prod?.name}</p>
-                        <p className="font-mono text-xs text-slate-500">{prod?.sku}</p>
-                      </TableCell>
-                      <TableCell className="text-xs text-slate-600">{formatCurrency(costPrice, sym)}</TableCell>
-                      <TableCell>{formatCurrency(prod?.product_prices?.published_selling_price ?? 0, sym)}</TableCell>
-                      <TableCell className="font-semibold text-blue-700">{formatCurrency(cp.custom_selling_price, sym)}</TableCell>
-                      <TableCell
-                        className={cn(
-                          "text-xs font-semibold",
-                          realized.marginAmount < 0 ? "text-red-700" : "text-emerald-700"
-                        )}
-                      >
-                        {formatSignedCurrency(realized.marginAmount, sym)} ({realized.marginPercentage}%)
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button variant="ghost" size="icon" className="text-red-600" onClick={() => removeCustomPrice(cp.id)}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </TableCell>
-                    </TableRow>
+                    <div key={cp.id} className="flex items-start justify-between gap-2 p-3 text-xs">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <p className="truncate font-semibold text-slate-900">{prod?.name}</p>
+                        <p className="font-mono text-slate-500">{prod?.sku}</p>
+                        <div className="flex flex-wrap gap-x-3 gap-y-1 text-slate-600">
+                          <span>Cost: {formatCurrency(costPrice, sym)}</span>
+                          <span>Catalog: {formatCurrency(prod?.product_prices?.published_selling_price ?? 0, sym)}</span>
+                          <span className="font-semibold text-blue-700">
+                            Custom: {formatCurrency(cp.custom_selling_price, sym)}
+                          </span>
+                        </div>
+                        <p className={cn("font-semibold", realized.marginAmount < 0 ? "text-red-700" : "text-emerald-700")}>
+                          Margin: {formatSignedCurrency(realized.marginAmount, sym)} ({realized.marginPercentage}%)
+                        </p>
+                      </div>
+                      <Button variant="ghost" size="icon" className="shrink-0 text-red-600" onClick={() => removeCustomPrice(cp.id)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                   );
                 })}
-              </TableBody>
-            </Table>
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Product</TableHead>
+                      <TableHead>Mfg Cost (Admin)</TableHead>
+                      <TableHead>Standard Catalog Price</TableHead>
+                      <TableHead>Custom Customer Price</TableHead>
+                      <TableHead>Realized Margin</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {customPrices.map((cp) => {
+                      const prod = cp.products as unknown as {
+                        name: string;
+                        sku: string;
+                        product_prices: {
+                          published_selling_price: number;
+                          published_manufacturer_price: number | null;
+                          draft_manufacturer_price: number | null;
+                        };
+                      };
+                      const costPrice = Number(
+                        prod?.product_prices?.published_manufacturer_price ??
+                          prod?.product_prices?.draft_manufacturer_price ??
+                          0
+                      );
+                      const realized = calculateRealizedGrossMargin(Number(cp.custom_selling_price), costPrice);
+                      return (
+                        <TableRow key={cp.id}>
+                          <TableCell>
+                            <p className="font-medium">{prod?.name}</p>
+                            <p className="font-mono text-xs text-slate-500">{prod?.sku}</p>
+                          </TableCell>
+                          <TableCell className="text-xs text-slate-600">{formatCurrency(costPrice, sym)}</TableCell>
+                          <TableCell>{formatCurrency(prod?.product_prices?.published_selling_price ?? 0, sym)}</TableCell>
+                          <TableCell className="font-semibold text-blue-700">{formatCurrency(cp.custom_selling_price, sym)}</TableCell>
+                          <TableCell
+                            className={cn(
+                              "text-xs font-semibold",
+                              realized.marginAmount < 0 ? "text-red-700" : "text-emerald-700"
+                            )}
+                          >
+                            {formatSignedCurrency(realized.marginAmount, sym)} ({realized.marginPercentage}%)
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button variant="ghost" size="icon" className="text-red-600" onClick={() => removeCustomPrice(cp.id)}>
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -442,80 +515,148 @@ export function CustomerDetailPage() {
             <CardTitle>Order History &amp; Payment Dues ({orders.length})</CardTitle>
           </CardHeader>
           <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Order #</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Total / Paid</TableHead>
-                  <TableHead>Due</TableHead>
-                  <TableHead className="text-right">Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {orders.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={5} className="py-6 text-center text-slate-500">
-                      No orders placed yet.
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  orders.map((o) => {
-                    const paidAmt = Number(o.paid_amount ?? 0);
-                    const dueAmt =
-                      o.order_status === "Cancelled"
-                        ? 0
-                        : Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - paidAmt));
-                    return (
-                      <TableRow key={o.id}>
-                        <TableCell>
+            {orders.length === 0 ? (
+              <div className="py-6 text-center text-xs text-slate-500 md:hidden">No orders placed yet.</div>
+            ) : (
+              <div className="divide-y divide-slate-100 md:hidden">
+                {orders.map((o) => {
+                  const paidAmt = Number(o.paid_amount ?? 0);
+                  const dueAmt =
+                    o.order_status === "Cancelled"
+                      ? 0
+                      : Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - paidAmt));
+                  return (
+                    <div key={o.id} className="space-y-2 p-4 text-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
                           <Link to={`/admin/orders/${o.id}`} className="font-semibold text-blue-700 hover:underline">
                             {o.order_number}
                           </Link>
                           <p className="text-[11px] text-slate-500">{formatDate(o.placed_at)}</p>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex flex-col gap-1">
-                            <StatusBadge status={o.order_status} />
-                            <StatusBadge status={o.payment_status} />
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          <p className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</p>
-                          <p className="text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</p>
-                        </TableCell>
-                        <TableCell className={cn("text-xs font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
-                          {o.order_status === "Cancelled" ? "—" : formatCurrency(dueAmt, sym)}
-                        </TableCell>
-                        <TableCell className="text-right">
+                        </div>
+                        <div className="flex flex-wrap justify-end gap-1">
+                          <StatusBadge status={o.order_status} />
+                          <StatusBadge status={o.payment_status} />
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                        <div>
+                          <span className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</span>
+                          <span className="mx-1.5 text-slate-300">|</span>
+                          <span className="text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</span>
                           {o.order_status !== "Cancelled" && (
-                            <Button
-                              size="sm"
-                              variant={dueAmt > 0 ? "default" : "outline"}
-                              onClick={() =>
-                                setPaymentOrder({
-                                  id: o.id,
-                                  order_number: o.order_number,
-                                  customer_name: customer.business_name,
-                                  total_amount: Number(o.total_amount),
-                                  paid_amount: paidAmt,
-                                  due_amount: dueAmt,
-                                  payment_status: o.payment_status,
-                                  order_status: o.order_status,
-                                })
-                              }
-                            >
-                              <IndianRupee className="h-3.5 w-3.5" />
-                              Pay
-                            </Button>
+                            <>
+                              <span className="mx-1.5 text-slate-300">|</span>
+                              <span className={cn("font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
+                                Due: {formatCurrency(dueAmt, sym)}
+                              </span>
+                            </>
                           )}
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })
-                )}
-              </TableBody>
-            </Table>
+                        </div>
+                        {o.order_status !== "Cancelled" && (
+                          <Button
+                            size="sm"
+                            variant={dueAmt > 0 ? "default" : "outline"}
+                            onClick={() =>
+                              setPaymentOrder({
+                                id: o.id,
+                                order_number: o.order_number,
+                                customer_name: customer.business_name,
+                                total_amount: Number(o.total_amount),
+                                paid_amount: paidAmt,
+                                due_amount: dueAmt,
+                                payment_status: o.payment_status,
+                                order_status: o.order_status,
+                              })
+                            }
+                          >
+                            <IndianRupee className="h-3.5 w-3.5" />
+                            Pay
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="hidden md:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Order #</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Total / Paid</TableHead>
+                    <TableHead>Due</TableHead>
+                    <TableHead className="text-right">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {orders.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="py-6 text-center text-slate-500">
+                        No orders placed yet.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    orders.map((o) => {
+                      const paidAmt = Number(o.paid_amount ?? 0);
+                      const dueAmt =
+                        o.order_status === "Cancelled"
+                          ? 0
+                          : Math.max(0, Number(o.due_amount ?? Number(o.total_amount) - paidAmt));
+                      return (
+                        <TableRow key={o.id}>
+                          <TableCell>
+                            <Link to={`/admin/orders/${o.id}`} className="font-semibold text-blue-700 hover:underline">
+                              {o.order_number}
+                            </Link>
+                            <p className="text-[11px] text-slate-500">{formatDate(o.placed_at)}</p>
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-col gap-1">
+                              <StatusBadge status={o.order_status} />
+                              <StatusBadge status={o.payment_status} />
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            <p className="font-semibold text-slate-900">{formatCurrency(o.total_amount, sym)}</p>
+                            <p className="text-emerald-700">Paid: {formatCurrency(paidAmt, sym)}</p>
+                          </TableCell>
+                          <TableCell className={cn("text-xs font-bold", dueAmt > 0 ? "text-red-700" : "text-emerald-700")}>
+                            {o.order_status === "Cancelled" ? "—" : formatCurrency(dueAmt, sym)}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            {o.order_status !== "Cancelled" && (
+                              <Button
+                                size="sm"
+                                variant={dueAmt > 0 ? "default" : "outline"}
+                                onClick={() =>
+                                  setPaymentOrder({
+                                    id: o.id,
+                                    order_number: o.order_number,
+                                    customer_name: customer.business_name,
+                                    total_amount: Number(o.total_amount),
+                                    paid_amount: paidAmt,
+                                    due_amount: dueAmt,
+                                    payment_status: o.payment_status,
+                                    order_status: o.order_status,
+                                  })
+                                }
+                              >
+                                <IndianRupee className="h-3.5 w-3.5" />
+                                Pay
+                              </Button>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
+                  )}
+                </TableBody>
+              </Table>
+            </div>
           </CardContent>
         </Card>
 
@@ -524,38 +665,79 @@ export function CustomerDetailPage() {
             <CardTitle>Invoices ({invoices.length})</CardTitle>
           </CardHeader>
           <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Invoice #</TableHead>
-                  <TableHead>Due Date</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Balance Due</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {invoices.length === 0 ? (
+            {invoices.length === 0 ? (
+              <div className="py-6 text-center text-xs text-slate-500 md:hidden">No invoices issued yet.</div>
+            ) : (
+              <div className="divide-y divide-slate-100 md:hidden">
+                {invoices.map((inv) => {
+                  const isCancelledOrder = cancelledOrderIds.has(inv.order_id);
+                  const invDue = isCancelledOrder ? 0 : Math.max(0, Number(inv.total_amount) - Number(inv.paid_amount));
+                  return (
+                    <div key={inv.id} className="flex items-center justify-between gap-2 p-4 text-xs">
+                      <div>
+                        <p className="font-semibold text-slate-900">{inv.invoice_number}</p>
+                        <p className="text-slate-500">Due {formatDate(inv.due_date)}</p>
+                      </div>
+                      <div className="flex flex-col items-end gap-1">
+                        <StatusBadge status={isCancelledOrder ? "cancelled" : inv.payment_status} />
+                        <span
+                          className={cn(
+                            "font-semibold",
+                            isCancelledOrder ? "text-slate-400" : invDue > 0 ? "text-red-700" : "text-emerald-700"
+                          )}
+                        >
+                          {isCancelledOrder ? "Void" : `Due ${formatCurrency(invDue, sym)}`}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="hidden md:block">
+              <Table>
+                <TableHeader>
                   <TableRow>
-                    <TableCell colSpan={4} className="py-6 text-center text-slate-500">
-                      No invoices issued yet.
-                    </TableCell>
+                    <TableHead>Invoice #</TableHead>
+                    <TableHead>Due Date</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Balance Due</TableHead>
                   </TableRow>
-                ) : (
-                  invoices.map((inv) => (
-                    <TableRow key={inv.id}>
-                      <TableCell className="font-semibold">{inv.invoice_number}</TableCell>
-                      <TableCell className="text-xs text-slate-500">{formatDate(inv.due_date)}</TableCell>
-                      <TableCell>
-                        <StatusBadge status={inv.payment_status} />
-                      </TableCell>
-                      <TableCell className="text-right font-semibold text-red-700">
-                        {formatCurrency(Math.max(0, Number(inv.total_amount) - Number(inv.paid_amount)), sym)}
+                </TableHeader>
+                <TableBody>
+                  {invoices.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={4} className="py-6 text-center text-slate-500">
+                        No invoices issued yet.
                       </TableCell>
                     </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
+                  ) : (
+                    invoices.map((inv) => {
+                      const isCancelledOrder = cancelledOrderIds.has(inv.order_id);
+                      const invDue = isCancelledOrder ? 0 : Math.max(0, Number(inv.total_amount) - Number(inv.paid_amount));
+                      return (
+                        <TableRow key={inv.id}>
+                          <TableCell className="font-semibold">{inv.invoice_number}</TableCell>
+                          <TableCell className="text-xs text-slate-500">{formatDate(inv.due_date)}</TableCell>
+                          <TableCell>
+                            <StatusBadge status={isCancelledOrder ? "cancelled" : inv.payment_status} />
+                          </TableCell>
+                          <TableCell
+                            className={cn(
+                              "text-right font-semibold",
+                              isCancelledOrder ? "text-slate-400" : invDue > 0 ? "text-red-700" : "text-emerald-700"
+                            )}
+                          >
+                            {isCancelledOrder ? "Void" : formatCurrency(invDue, sym)}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
+                  )}
+                </TableBody>
+              </Table>
+            </div>
           </CardContent>
         </Card>
       </div>
