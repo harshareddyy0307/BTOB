@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Plus, Package, Pencil, Copy, Trash2, Globe, GlobeLock, Camera } from "lucide-react";
+import { Plus, Package, Pencil, Copy, Trash2, Globe, GlobeLock, Camera, Loader2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/contexts/AuthContext";
+import { bulkPublishProducts, bulkUnpublishProducts, invalidateCatalogQueries } from "@/lib/productPublishing";
 import { formatCurrency, formatQty } from "@/lib/utils";
 import type { AdminProduct, Category, Manufacturer } from "@/types/database";
 import { Button } from "@/components/ui/button";
@@ -16,6 +18,7 @@ import { ProductPhotoDialog, sortProductImages } from "@/components/admin/Produc
 import { useToast } from "@/components/ui/toast";
 
 export function ProductCatalogPage() {
+  const { userProfile } = useAuth();
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -31,6 +34,7 @@ export function ProductCatalogPage() {
   const [editing, setEditing] = useState<AdminProduct | null>(null);
   const [duplicateMode, setDuplicateMode] = useState(false);
   const [photoProduct, setPhotoProduct] = useState<AdminProduct | null>(null);
+  const [bulkAction, setBulkAction] = useState<"publish" | "unpublish" | null>(null);
 
   const { data: categories = [] } = useQuery({
     queryKey: ["admin-categories"],
@@ -80,9 +84,53 @@ export function ProductCatalogPage() {
         if (error) throw error;
         toast({ title: `"${p.name}" unpublished from Customer Catalog`, type: "info" });
       }
-      queryClient.invalidateQueries({ queryKey: ["admin-all-products"] });
+      await invalidateCatalogQueries(queryClient);
     } catch (err) {
       toast({ title: "Action failed", description: err instanceof Error ? err.message : "Error", type: "error" });
+    }
+  };
+
+  const handlePublishAll = async () => {
+    if (draftTargets.length === 0) return;
+    setBulkAction("publish");
+    try {
+      const { publishedCount, skippedZeroPriceCount } = await bulkPublishProducts(filtered, queryClient);
+      if (publishedCount === 0 && skippedZeroPriceCount > 0) {
+        toast({
+          title: "Cannot publish ₹0 price products",
+          description: `${skippedZeroPriceCount} unpublished product(s) have a ₹0 selling price. Set manufacturer price or margin first.`,
+          type: "error",
+        });
+        return;
+      }
+      toast({
+        title: `Published ${publishedCount} product(s) to Customer Catalog`,
+        description:
+          skippedZeroPriceCount > 0
+            ? `Skipped ${skippedZeroPriceCount} product(s) with ₹0 selling price.`
+            : undefined,
+        type: "success",
+      });
+    } catch (err) {
+      toast({ title: "Bulk publish failed", description: err instanceof Error ? err.message : "Error", type: "error" });
+    } finally {
+      setBulkAction(null);
+    }
+  };
+
+  const handleUnpublishAll = async () => {
+    if (publishedTargets.length === 0) return;
+    setBulkAction("unpublish");
+    try {
+      const { unpublishedCount } = await bulkUnpublishProducts(filtered, userProfile?.id, queryClient);
+      toast({
+        title: `Unpublished ${unpublishedCount} product(s) from Customer Catalog`,
+        type: "info",
+      });
+    } catch (err) {
+      toast({ title: "Bulk unpublish failed", description: err instanceof Error ? err.message : "Error", type: "error" });
+    } finally {
+      setBulkAction(null);
     }
   };
 
@@ -121,6 +169,17 @@ export function ProductCatalogPage() {
 
     return true;
   });
+
+  const hasActiveFilters =
+    Boolean(search.trim()) ||
+    categoryId !== "all" ||
+    manufacturerId !== "all" ||
+    availability !== "all" ||
+    publishedFilter !== "all" ||
+    Boolean(minPrice) ||
+    Boolean(maxPrice);
+  const draftTargets = filtered.filter((p) => !p.is_published);
+  const publishedTargets = filtered.filter((p) => p.is_published);
 
   return (
     <div className="space-y-6">
@@ -222,11 +281,41 @@ export function ProductCatalogPage() {
       </Card>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <CardTitle className="flex items-center gap-2">
             <Package className="h-4 w-4 text-blue-700" />
             Products ({filtered.length})
           </CardTitle>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="border-emerald-200 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
+              disabled={bulkAction !== null || draftTargets.length === 0}
+              onClick={handlePublishAll}
+            >
+              {bulkAction === "publish" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+              {hasActiveFilters ? `Publish Filtered (${draftTargets.length})` : `Publish All (${draftTargets.length})`}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="border-amber-200 text-amber-700 hover:bg-amber-50 hover:text-amber-800"
+              disabled={bulkAction !== null || publishedTargets.length === 0}
+              onClick={handleUnpublishAll}
+            >
+              {bulkAction === "unpublish" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <GlobeLock className="h-4 w-4" />
+              )}
+              {hasActiveFilters
+                ? `Unpublish Filtered (${publishedTargets.length})`
+                : `Unpublish All (${publishedTargets.length})`}
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="p-0">
           <Table>

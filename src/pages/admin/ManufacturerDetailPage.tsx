@@ -12,6 +12,7 @@ import {
   Trash2,
   Loader2,
   Globe,
+  GlobeLock,
   Phone,
   Mail,
   MapPin,
@@ -19,6 +20,8 @@ import {
   Camera,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/contexts/AuthContext";
+import { bulkPublishProducts, bulkUnpublishProducts, invalidateCatalogQueries } from "@/lib/productPublishing";
 import { getManufacturerAssetSignedUrl, uploadStorageFile } from "@/lib/storage";
 import { formatCurrency, formatQty } from "@/lib/utils";
 import type { AdminProduct, Category, Manufacturer } from "@/types/database";
@@ -36,6 +39,7 @@ import { useToast } from "@/components/ui/toast";
 
 export function ManufacturerDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const { userProfile } = useAuth();
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -45,6 +49,7 @@ export function ManufacturerDetailPage() {
   const [editingProduct, setEditingProduct] = useState<AdminProduct | null>(null);
   const [duplicateMode, setDuplicateMode] = useState(false);
   const [photoProduct, setPhotoProduct] = useState<AdminProduct | null>(null);
+  const [bulkPublishAction, setBulkPublishAction] = useState<"publish" | "unpublish" | null>(null);
 
   const [galleryUrls, setGalleryUrls] = useState<string[]>([]);
   const [uploadingPhotos, setUploadingPhotos] = useState(false);
@@ -261,6 +266,74 @@ export function ManufacturerDetailPage() {
     }
   };
 
+  const handleToggleProductPublish = async (p: AdminProduct) => {
+    try {
+      if (!p.is_published) {
+        if (Number(p.product_prices?.draft_selling_price ?? 0) <= 0) {
+          toast({ title: "Cannot publish product with ₹0 selling price", type: "error" });
+          return;
+        }
+        const { error } = await supabase.rpc("publish_product_prices", {
+          p_product_ids: [p.id],
+          p_mark_products_published: true,
+        });
+        if (error) throw error;
+        toast({ title: `"${p.name}" published to Customer Catalog`, type: "success" });
+      } else {
+        const { error } = await supabase.from("products").update({ is_published: false }).eq("id", p.id);
+        if (error) throw error;
+        toast({ title: `"${p.name}" unpublished from Customer Catalog`, type: "info" });
+      }
+      await invalidateCatalogQueries(queryClient);
+    } catch (err) {
+      toast({ title: "Action failed", description: err instanceof Error ? err.message : "Error", type: "error" });
+    }
+  };
+
+  const handlePublishAllManufacturerProducts = async () => {
+    if (mfgDraftTargets.length === 0) return;
+    setBulkPublishAction("publish");
+    try {
+      const { publishedCount, skippedZeroPriceCount } = await bulkPublishProducts(filteredProducts, queryClient);
+      if (publishedCount === 0 && skippedZeroPriceCount > 0) {
+        toast({
+          title: "Cannot publish ₹0 price products",
+          description: `${skippedZeroPriceCount} unpublished product(s) have a ₹0 selling price. Set manufacturer price or margin first.`,
+          type: "error",
+        });
+        return;
+      }
+      toast({
+        title: `Published ${publishedCount} product(s) to Customer Catalog`,
+        description:
+          skippedZeroPriceCount > 0
+            ? `Skipped ${skippedZeroPriceCount} product(s) with ₹0 selling price.`
+            : undefined,
+        type: "success",
+      });
+    } catch (err) {
+      toast({ title: "Bulk publish failed", description: err instanceof Error ? err.message : "Error", type: "error" });
+    } finally {
+      setBulkPublishAction(null);
+    }
+  };
+
+  const handleUnpublishAllManufacturerProducts = async () => {
+    if (mfgPublishedTargets.length === 0) return;
+    setBulkPublishAction("unpublish");
+    try {
+      const { unpublishedCount } = await bulkUnpublishProducts(filteredProducts, userProfile?.id, queryClient);
+      toast({
+        title: `Unpublished ${unpublishedCount} product(s) from Customer Catalog`,
+        type: "info",
+      });
+    } catch (err) {
+      toast({ title: "Bulk unpublish failed", description: err instanceof Error ? err.message : "Error", type: "error" });
+    } finally {
+      setBulkPublishAction(null);
+    }
+  };
+
   const handleDeleteProduct = async (p: AdminProduct) => {
     if (!confirm(`Delete product "${p.name}" (${p.sku})?`)) return;
     const { error } = await supabase.from("products").delete().eq("id", p.id);
@@ -278,6 +351,10 @@ export function ManufacturerDetailPage() {
     const matchesQ = !q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q);
     return matchesCat && matchesQ;
   });
+
+  const hasActiveMfgFilters = Boolean(search.trim()) || catFilter !== "all";
+  const mfgDraftTargets = filteredProducts.filter((p) => !p.is_published);
+  const mfgPublishedTargets = filteredProducts.filter((p) => p.is_published);
 
   if (loadingMfg) {
     return <div className="py-12 text-center text-sm text-slate-500">Loading manufacturer profile...</div>;
@@ -394,6 +471,40 @@ export function ManufacturerDetailPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="border-emerald-200 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
+              disabled={bulkPublishAction !== null || mfgDraftTargets.length === 0}
+              onClick={handlePublishAllManufacturerProducts}
+            >
+              {bulkPublishAction === "publish" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Globe className="h-4 w-4" />
+              )}
+              {hasActiveMfgFilters
+                ? `Publish Filtered (${mfgDraftTargets.length})`
+                : `Publish All (${mfgDraftTargets.length})`}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="border-amber-200 text-amber-700 hover:bg-amber-50 hover:text-amber-800"
+              disabled={bulkPublishAction !== null || mfgPublishedTargets.length === 0}
+              onClick={handleUnpublishAllManufacturerProducts}
+            >
+              {bulkPublishAction === "unpublish" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <GlobeLock className="h-4 w-4" />
+              )}
+              {hasActiveMfgFilters
+                ? `Unpublish Filtered (${mfgPublishedTargets.length})`
+                : `Unpublish All (${mfgPublishedTargets.length})`}
+            </Button>
             <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
               <FileSpreadsheet className="h-4 w-4" />
               Bulk Excel Import
@@ -548,6 +659,18 @@ export function ManufacturerDetailPage() {
                           >
                             <Camera className="h-3.5 w-3.5 text-blue-700" />
                             <span>{sortedPhotos.length > 0 ? `Photos (${sortedPhotos.length})` : "Add Photo"}</span>
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleToggleProductPublish(p)}
+                            title={p.is_published ? "Unpublish from Customer Catalog" : "Publish to Customer Catalog"}
+                          >
+                            {p.is_published ? (
+                              <GlobeLock className="h-4 w-4 text-amber-600" />
+                            ) : (
+                              <Globe className="h-4 w-4 text-emerald-600" />
+                            )}
                           </Button>
                           <Button
                             variant="ghost"

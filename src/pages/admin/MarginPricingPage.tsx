@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Globe, Percent, History, Loader2 } from "lucide-react";
+import { CheckCircle2, Globe, GlobeLock, Percent, History, Loader2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/contexts/AuthContext";
+import { bulkPublishProducts, bulkUnpublishProducts, invalidateCatalogQueries } from "@/lib/productPublishing";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 import type { AdminProduct, Category } from "@/types/database";
 import { Button } from "@/components/ui/button";
@@ -28,6 +30,7 @@ interface MarginRuleRow {
 }
 
 export function MarginPricingPage() {
+  const { userProfile } = useAuth();
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -40,6 +43,7 @@ export function MarginPricingPage() {
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [publishing, setPublishing] = useState(false);
+  const [unpublishing, setUnpublishing] = useState(false);
   const [onlyPending, setOnlyPending] = useState(false);
 
   const { data: categories = [] } = useQuery({
@@ -92,10 +96,8 @@ export function MarginPricingPage() {
   });
 
   const invalidateAll = () => {
+    void invalidateCatalogQueries(queryClient);
     queryClient.invalidateQueries({ queryKey: ["admin-margin-rules"] });
-    queryClient.invalidateQueries({ queryKey: ["admin-pricing-products"] });
-    queryClient.invalidateQueries({ queryKey: ["admin-price-history"] });
-    queryClient.invalidateQueries({ queryKey: ["admin-all-products"] });
   };
 
   const applyMarginRule = async (
@@ -162,13 +164,22 @@ export function MarginPricingPage() {
     if (ids.length === 0) return;
     setPublishing(true);
     try {
-      const { data: count, error } = await supabase.rpc("publish_product_prices", {
-        p_product_ids: ids,
-        p_mark_products_published: true,
+      const targetProducts = products.filter((p) => ids.includes(p.id));
+      const { publishedCount, skippedZeroPriceCount } = await bulkPublishProducts(targetProducts, queryClient, {
+        includePublishedPendingPrice: true,
       });
-      if (error) throw error;
+      if (publishedCount === 0 && skippedZeroPriceCount > 0) {
+        toast({
+          title: "Cannot publish ₹0 price products",
+          description: `${skippedZeroPriceCount} product(s) have a ₹0 selling price.`,
+          type: "error",
+        });
+        return;
+      }
       toast({
-        title: `Published ${count} product price(s) to Customer Catalog`,
+        title: `Published ${publishedCount} product price(s) to Customer Catalog`,
+        description:
+          skippedZeroPriceCount > 0 ? `Skipped ${skippedZeroPriceCount} ₹0-price product(s).` : undefined,
         type: "success",
       });
       setSelectedIds([]);
@@ -180,7 +191,25 @@ export function MarginPricingPage() {
     }
   };
 
+  const handleUnpublishAll = async () => {
+    if (publishedProducts.length === 0) return;
+    setUnpublishing(true);
+    try {
+      const { unpublishedCount } = await bulkUnpublishProducts(publishedProducts, userProfile?.id, queryClient);
+      toast({
+        title: `Unpublished ${unpublishedCount} product(s) from Customer Catalog`,
+        type: "info",
+      });
+      invalidateAll();
+    } catch (err) {
+      toast({ title: "Unpublish failed", description: err instanceof Error ? err.message : "Error", type: "error" });
+    } finally {
+      setUnpublishing(false);
+    }
+  };
+
   const pendingProducts = products.filter((p) => p.product_prices?.approval_status === "pending_review" || !p.is_published);
+  const publishedProducts = products.filter((p) => p.is_published);
   const displayedProducts = onlyPending ? pendingProducts : products;
 
   const toggleSelect = (id: string) => {
@@ -197,13 +226,24 @@ export function MarginPricingPage() {
             calculations before publishing to customers.
           </p>
         </div>
-        <Button
-          onClick={() => publishIds(pendingProducts.map((p) => p.id))}
-          disabled={publishing || pendingProducts.length === 0}
-        >
-          {publishing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
-          Publish All Pending ({pendingProducts.length})
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            onClick={() => publishIds(pendingProducts.map((p) => p.id))}
+            disabled={publishing || unpublishing || pendingProducts.length === 0}
+          >
+            {publishing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+            Publish All Pending ({pendingProducts.length})
+          </Button>
+          <Button
+            variant="outline"
+            className="border-amber-200 text-amber-700 hover:bg-amber-50 hover:text-amber-800"
+            onClick={handleUnpublishAll}
+            disabled={publishing || unpublishing || publishedProducts.length === 0}
+          >
+            {unpublishing ? <Loader2 className="h-4 w-4 animate-spin" /> : <GlobeLock className="h-4 w-4" />}
+            Unpublish All ({publishedProducts.length})
+          </Button>
+        </div>
       </div>
 
       <Tabs defaultValue="rules">
