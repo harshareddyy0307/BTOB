@@ -30,7 +30,6 @@ export function CustomersPage() {
   const [ownerName, setOwnerName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [address, setAddress] = useState("");
   const [city, setCity] = useState("");
   const [stateVal, setStateVal] = useState("Telangana");
@@ -57,7 +56,6 @@ export function CustomersPage() {
     setOwnerName("");
     setPhone("");
     setEmail("");
-    setPassword("");
     setAddress("");
     setCity("");
     setStateVal("Telangana");
@@ -74,7 +72,6 @@ export function CustomersPage() {
     setOwnerName(c.owner_name);
     setPhone(c.phone);
     setEmail(c.email);
-    setPassword("");
     setAddress(c.business_address);
     setCity(c.city || "");
     setStateVal(c.state || "Telangana");
@@ -134,7 +131,6 @@ export function CustomersPage() {
             owner_name: ownerName.trim(),
             phone: phone.trim(),
             email: email.trim().toLowerCase(),
-            password,
             business_address: address.trim(),
             city: city.trim(),
             state: stateVal.trim(),
@@ -143,11 +139,11 @@ export function CustomersPage() {
             business_category: businessCategory.trim(),
             status,
           },
-          "Failed to provision customer login"
+          "Failed to provision customer account"
         );
         toast({
-          title: "Customer registered & login created",
-          description: `Credentials created for ${email.trim().toLowerCase()}`,
+          title: "Customer business registered",
+          description: `${businessName.trim()} can enter Customer Portal via ${phone.trim()} or ${email.trim().toLowerCase()} (no password needed).`,
           type: "success",
         });
       }
@@ -222,7 +218,7 @@ export function CustomersPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">Customer Management</h1>
           <p className="text-sm text-slate-500">
-            Manage registered local businesses, login credentials, outstanding dues, and custom pricing.
+            Manage registered local businesses, passwordless portal access, outstanding dues, and custom pricing.
           </p>
         </div>
         <Button onClick={openCreate}>
@@ -365,7 +361,7 @@ export function CustomersPage() {
                 <Input value={phone} onChange={(e) => setPhone(e.target.value)} required />
               </div>
               <div className="space-y-1.5">
-                <Label>Login Email *</Label>
+                <Label>Business / Login Email *</Label>
                 <Input
                   type="email"
                   value={email}
@@ -377,16 +373,9 @@ export function CustomersPage() {
             </div>
 
             {!editing && (
-              <div className="space-y-1.5">
-                <Label>Initial Portal Password (min 8 chars) *</Label>
-                <Input
-                  type="password"
-                  minLength={8}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  placeholder="Provided to business owner for Customer Portal login"
-                />
+              <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                No password needed &mdash; once registered, the business can enter the Customer Portal directly using
+                their registered phone number or email.
               </div>
             )}
 

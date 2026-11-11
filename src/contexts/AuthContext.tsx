@@ -18,6 +18,7 @@ interface AuthContextValue {
   branding: PublicBranding;
   loading: boolean;
   signIn: (identifier: string, password: string) => Promise<{ error: string | null; role?: UserRole | null }>;
+  signInCustomer: (identifier: string) => Promise<{ error: string | null; role?: UserRole | null }>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   refreshBranding: () => Promise<void>;
@@ -280,6 +281,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return { error: null, role };
   };
 
+  const signInCustomer = async (identifier: string) => {
+    if (!isSupabaseConfigured) {
+      return { error: "Supabase environment variables are not configured." };
+    }
+    const cleanIdentifier = identifier.trim();
+    if (!cleanIdentifier) {
+      return { error: "Enter your registered business phone number or email address." };
+    }
+
+    const { data: fnData, error: fnErr } = await supabase.functions.invoke("customer-login", {
+      body: { identifier: cleanIdentifier },
+    });
+    if (fnErr || fnData?.error || !fnData?.access_token || !fnData?.refresh_token) {
+      const msg = await extractEdgeFunctionError(
+        fnErr,
+        fnData,
+        "No active customer account found for that phone number or email."
+      );
+      return { error: msg };
+    }
+
+    const { data: sessData, error: sessErr } = await supabase.auth.setSession({
+      access_token: fnData.access_token as string,
+      refresh_token: fnData.refresh_token as string,
+    });
+    if (sessErr || !sessData.user) {
+      return { error: sessErr?.message || "Failed to initialize customer portal session." };
+    }
+
+    const role = await loadUserDetails(sessData.user.id);
+    if (role !== "customer") {
+      await supabase.auth.signOut({ scope: "local" });
+      return { error: "Your customer portal account is inactive or unavailable." };
+    }
+
+    return { error: null, role };
+  };
+
   const signOut = async () => {
     await supabase.auth.signOut({ scope: "local" });
     setSession(null);
@@ -297,6 +336,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         branding,
         loading,
         signIn,
+        signInCustomer,
         signOut,
         refreshProfile,
         refreshBranding,

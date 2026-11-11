@@ -114,7 +114,8 @@ export function App() {
             <Suspense fallback={<RouteLoader />}>
               <Routes>
                 <Route path="/login" element={<LoginPage />} />
-                <Route path="/admin/login" element={<Navigate to="/login" replace />} />
+                <Route path="/admin/login" element={<Navigate to="/login?portal=admin" replace />} />
+                <Route path="/customer/login" element={<Navigate to="/login" replace />} />
 
                 {/* ADMIN PORTAL (Admin & Staff Roles Only) */}
                 <Route

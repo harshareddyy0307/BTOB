@@ -86,19 +86,26 @@ Deno.serve(async (req: Request) => {
       status = "active",
     } = body;
 
-    if (!business_name || !owner_name || !phone || !email || !password || !business_address) {
+    if (!business_name || !owner_name || !phone || !email || !business_address) {
       return new Response(JSON.stringify({ error: "Missing required customer fields" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    if (String(password).length < 8) {
-      return new Response(JSON.stringify({ error: "Password must be at least 8 characters" }), {
+    const rawPassword = typeof password === "string" ? password.trim() : "";
+    if (rawPassword.length > 0 && rawPassword.length < 8) {
+      return new Response(JSON.stringify({ error: "Password must be at least 8 characters when provided" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+
+    const generateInternalSecret = () => {
+      const bytes = crypto.getRandomValues(new Uint8Array(24));
+      return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    };
+    const effectivePassword = rawPassword.length >= 8 ? rawPassword : generateInternalSecret();
 
     if (!["active", "inactive", "suspended"].includes(status)) {
       return new Response(JSON.stringify({ error: "Status must be active, inactive, or suspended" }), {
@@ -122,7 +129,7 @@ Deno.serve(async (req: Request) => {
 
     const { data: authData, error: createAuthErr } = await adminClient.auth.admin.createUser({
       email: String(email).trim().toLowerCase(),
-      password: String(password),
+      password: effectivePassword,
       email_confirm: true,
       app_metadata: { role: "customer" },
       user_metadata: { full_name: owner_name },
