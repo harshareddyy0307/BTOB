@@ -65,6 +65,18 @@ export function AdminLayout() {
     refetchInterval: 15000,
   });
 
+  const { data: pendingCustomerCount = 0 } = useQuery({
+    queryKey: ["admin-pending-customers-count"],
+    queryFn: async () => {
+      const { count } = await supabase
+        .from("customers")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "pending");
+      return count ?? 0;
+    },
+    refetchInterval: 15000,
+  });
+
   const unreadCount = notifications.filter((n) => !n.is_read).length;
 
   const markAllRead = async () => {
@@ -80,7 +92,9 @@ export function AdminLayout() {
       refetchNotifs();
     }
     setNotifOpen(false);
-    if ((n.entity_type === "order" || n.entity_type === "order_payment_claim") && n.entity_id) {
+    if (n.entity_type === "customer_registration") {
+      navigate(n.entity_id ? `/admin/customers/${n.entity_id}` : "/admin/customers");
+    } else if ((n.entity_type === "order" || n.entity_type === "order_payment_claim") && n.entity_id) {
       navigate(`/admin/orders/${n.entity_id}`);
     } else if (n.entity_type === "purchase_order" && n.entity_id) {
       navigate(`/admin/purchase-orders/${n.entity_id}`);
@@ -158,7 +172,12 @@ export function AdminLayout() {
                 title={collapsed ? item.label : undefined}
               >
                 <Icon className="h-4 w-4 shrink-0" />
-                {!collapsed && <span className="truncate">{item.label}</span>}
+                {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
+                {!collapsed && item.to === "/admin/customers" && pendingCustomerCount > 0 && (
+                  <span className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">
+                    {pendingCustomerCount}
+                  </span>
+                )}
               </NavLink>
             );
           })}
@@ -266,6 +285,11 @@ export function AdminLayout() {
                           {n.entity_type === "order_payment_claim" && (
                             <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">
                               Payment
+                            </span>
+                          )}
+                          {n.entity_type === "customer_registration" && (
+                            <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-bold text-blue-800">
+                              Access Request
                             </span>
                           )}
                         </div>

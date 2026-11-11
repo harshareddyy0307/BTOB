@@ -114,6 +114,7 @@ export function App() {
             <Suspense fallback={<RouteLoader />}>
               <Routes>
                 <Route path="/login" element={<LoginPage portal="customer" />} />
+                <Route path="/register" element={<LoginPage portal="customer" initialMode="register" />} />
                 <Route path="/24102026" element={<LoginPage portal="admin" />} />
                 <Route path="/customer/login" element={<Navigate to="/login" replace />} />
 

@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, Trash2, Loader2, IndianRupee, Power } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Loader2, IndianRupee, Power, CheckCircle2, XCircle, Clock } from "lucide-react";
 import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 import { invalidateCatalogQueries } from "@/lib/productPublishing";
@@ -124,10 +124,10 @@ export function CustomerDetailPage() {
     toast({ title: "Custom price removed", type: "info" });
   };
 
-  const toggleCustomerStatus = async () => {
+  const updateCustomerAccess = async (grantAccess: boolean) => {
     if (!customer || togglingStatus) return;
-    const nextActive = customer.status !== "active";
-    const nextStatus = nextActive ? "active" : "inactive";
+    const nextStatus = grantAccess ? "active" : "inactive";
+    const wasPending = customer.status === "pending";
     setTogglingStatus(true);
     try {
       if (customer.user_id) {
@@ -136,7 +136,7 @@ export function CustomerDetailPage() {
           {
             action: "toggle_user_status",
             user_id: customer.user_id,
-            is_active: nextActive,
+            is_active: grantAccess,
             customer_status: nextStatus,
           },
           "Failed to update customer status"
@@ -149,18 +149,32 @@ export function CustomerDetailPage() {
         if (error) throw error;
       }
       toast({
-        title: `${customer.business_name} is now ${nextActive ? "Active" : "Inactive"}`,
-        type: nextActive ? "success" : "info",
+        title: grantAccess
+          ? wasPending
+            ? `Access granted for ${customer.business_name}`
+            : `${customer.business_name} is now Active`
+          : wasPending
+            ? `Registration declined for ${customer.business_name}`
+            : `${customer.business_name} is now Inactive`,
+        type: grantAccess ? "success" : "info",
       });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["admin-customer-detail", customer.id] }),
         queryClient.invalidateQueries({ queryKey: ["admin-customers"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-pending-customers-count"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-notifications"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-dashboard-stats"] }),
       ]);
     } catch (err) {
       toast({ title: "Status update failed", description: err instanceof Error ? err.message : "Error", type: "error" });
     } finally {
       setTogglingStatus(false);
     }
+  };
+
+  const toggleCustomerStatus = async () => {
+    if (!customer) return;
+    await updateCustomerAccess(customer.status !== "active");
   };
 
   if (isLoading) return <div className="py-12 text-center text-sm text-slate-500">Loading customer profile...</div>;
@@ -183,21 +197,67 @@ export function CustomerDetailPage() {
         </Link>
         <div className="flex items-center gap-2">
           <StatusBadge status={customer.status} />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={toggleCustomerStatus}
-            disabled={togglingStatus}
-          >
-            {togglingStatus ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Power className={customer.status === "active" ? "h-3.5 w-3.5 text-amber-600" : "h-3.5 w-3.5 text-emerald-600"} />
-            )}
-            {customer.status === "active" ? "Deactivate" : "Activate"}
-          </Button>
+          {customer.status === "pending" ? (
+            <>
+              <Button
+                size="sm"
+                onClick={() => void updateCustomerAccess(true)}
+                disabled={togglingStatus}
+                className="bg-emerald-600 text-white hover:bg-emerald-700"
+              >
+                {togglingStatus ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                )}
+                Grant Access
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => void updateCustomerAccess(false)} disabled={togglingStatus}>
+                <XCircle className="h-3.5 w-3.5 text-red-600" />
+                Decline
+              </Button>
+            </>
+          ) : (
+            <Button variant="outline" size="sm" onClick={toggleCustomerStatus} disabled={togglingStatus}>
+              {togglingStatus ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Power className={customer.status === "active" ? "h-3.5 w-3.5 text-amber-600" : "h-3.5 w-3.5 text-emerald-600"} />
+              )}
+              {customer.status === "active" ? "Deactivate" : "Activate"}
+            </Button>
+          )}
         </div>
       </div>
+
+      {customer.status === "pending" && (
+        <div className="flex flex-col justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 sm:flex-row sm:items-center">
+          <div className="flex items-start gap-2.5">
+            <Clock className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
+            <div>
+              <p className="font-semibold">Awaiting Administrator Approval</p>
+              <p className="text-xs text-amber-900">
+                {customer.business_name} self-registered and cannot enter the Customer Portal until you click Grant Access.
+              </p>
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => void updateCustomerAccess(true)}
+              disabled={togglingStatus}
+              className="bg-emerald-600 text-white hover:bg-emerald-700"
+            >
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Grant Access
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => void updateCustomerAccess(false)} disabled={togglingStatus}>
+              <XCircle className="h-3.5 w-3.5 text-red-600" />
+              Decline
+            </Button>
+          </div>
+        </div>
+      )}
 
       <Card>
         <CardContent className="grid gap-6 p-6 md:grid-cols-3">

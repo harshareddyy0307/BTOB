@@ -39,6 +39,7 @@ export function AdminDashboardPage() {
       const [
         mfgRes,
         custRes,
+        pendingCustRes,
         prodRes,
         catRes,
         ordersRes,
@@ -48,6 +49,7 @@ export function AdminDashboardPage() {
       ] = await Promise.all([
         supabase.from("manufacturers").select("id", { count: "exact", head: true }),
         supabase.from("customers").select("id", { count: "exact", head: true }),
+        supabase.from("customers").select("id", { count: "exact", head: true }).eq("status", "pending"),
         supabase.from("products").select("id, status, category_id, name, categories(name)"),
         supabase.from("categories").select("id", { count: "exact", head: true }),
         supabase
@@ -166,6 +168,7 @@ export function AdminDashboardPage() {
       return {
         totalManufacturers: mfgRes.count ?? 0,
         totalCustomers: custRes.count ?? 0,
+        pendingCustomers: pendingCustRes.count ?? 0,
         totalProducts: products.length,
         activeProducts: products.filter((p) => p.status === "active").length,
         totalCategories: catRes.count ?? 0,
@@ -214,6 +217,25 @@ export function AdminDashboardPage() {
           <ArrowRight className="h-4 w-4" />
         </Link>
       </div>
+
+      {(data?.pendingCustomers ?? 0) > 0 && (
+        <Link
+          to="/admin/customers?status=pending"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 transition-colors hover:bg-amber-100/80"
+        >
+          <div className="flex items-center gap-2.5">
+            <Clock className="h-5 w-5 shrink-0 text-amber-700" />
+            <span>
+              <strong>{data?.pendingCustomers}</strong> customer business{" "}
+              {data?.pendingCustomers === 1 ? "registration is" : "registrations are"} waiting for access approval.
+            </span>
+          </div>
+          <span className="inline-flex items-center gap-1 font-semibold text-amber-900">
+            Review &amp; Grant Access
+            <ArrowRight className="h-4 w-4" />
+          </span>
+        </Link>
+      )}
 
       {/* Financial Summary Cards */}
       <div className="grid gap-4 md:grid-cols-3">

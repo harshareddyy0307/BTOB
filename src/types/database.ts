@@ -211,7 +211,7 @@ export interface CustomerProfile {
   pincode: string | null;
   gst_number: string | null;
   business_category: string | null;
-  status: "active" | "inactive" | "suspended";
+  status: "pending" | "active" | "inactive" | "suspended";
   registered_at: string;
 }
 

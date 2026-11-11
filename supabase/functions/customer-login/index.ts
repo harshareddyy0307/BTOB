@@ -105,9 +105,20 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    if (matchedCustomer.status === "pending") {
+      return jsonResponse(
+        {
+          code: "PENDING_APPROVAL",
+          error: `Your registration for ${matchedCustomer.business_name} is awaiting admin approval. You can enter the portal once the administrator grants access.`,
+        },
+        403
+      );
+    }
+
     if (matchedCustomer.status !== "active") {
       return jsonResponse(
         {
+          code: "ACCOUNT_DISABLED",
           error: `Your business account is currently ${matchedCustomer.status}. Please contact the agency administrator.`,
         },
         403

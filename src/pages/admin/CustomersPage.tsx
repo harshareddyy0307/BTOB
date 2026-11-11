@@ -1,7 +1,7 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
-import { Plus, Building2, Eye, Pencil, Power, Loader2 } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { Plus, Building2, Eye, Pencil, Power, Loader2, CheckCircle2, XCircle, Clock } from "lucide-react";
 import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
 import { formatDate } from "@/lib/utils";
 import type { CustomerProfile } from "@/types/database";
@@ -18,13 +18,17 @@ import { useToast } from "@/components/ui/toast";
 export function CustomersPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState(() => {
+    const initial = searchParams.get("status") || "all";
+    return ["all", "pending", "active", "inactive", "suspended"].includes(initial) ? initial : "all";
+  });
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<CustomerProfile | null>(null);
   const [saving, setSaving] = useState(false);
-  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [togglingIds, setTogglingIds] = useState<Record<string, boolean>>({});
 
   const [businessName, setBusinessName] = useState("");
   const [ownerName, setOwnerName] = useState("");
@@ -36,7 +40,24 @@ export function CustomersPage() {
   const [pincode, setPincode] = useState("");
   const [gstNumber, setGstNumber] = useState("");
   const [businessCategory, setBusinessCategory] = useState("");
-  const [status, setStatus] = useState<"active" | "inactive" | "suspended">("active");
+  const [status, setStatus] = useState<"pending" | "active" | "inactive" | "suspended">("active");
+
+  useEffect(() => {
+    const param = searchParams.get("status");
+    if (param && ["all", "pending", "active", "inactive", "suspended"].includes(param)) {
+      setStatusFilter(param);
+    }
+  }, [searchParams]);
+
+  const handleStatusFilterChange = (val: string) => {
+    setStatusFilter(val);
+    if (val === "all") {
+      searchParams.delete("status");
+      setSearchParams(searchParams, { replace: true });
+    } else {
+      setSearchParams({ status: val }, { replace: true });
+    }
+  };
 
   const { data: customers = [], isLoading } = useQuery({
     queryKey: ["admin-customers"],
@@ -149,7 +170,12 @@ export function CustomersPage() {
       }
 
       setModalOpen(false);
-      queryClient.invalidateQueries({ queryKey: ["admin-customers"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["admin-customers"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-pending-customers-count"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-notifications"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-dashboard-stats"] }),
+      ]);
     } catch (err) {
       toast({
         title: "Failed to save customer",
@@ -161,11 +187,10 @@ export function CustomersPage() {
     }
   };
 
-  const toggleStatus = async (c: CustomerProfile) => {
-    if (togglingId) return;
-    const nextActive = c.status !== "active";
-    const nextStatus = nextActive ? "active" : "inactive";
-    setTogglingId(c.id);
+  const updateCustomerAccess = async (c: CustomerProfile, grantAccess: boolean) => {
+    if (togglingIds[c.id]) return;
+    const nextStatus = grantAccess ? "active" : "inactive";
+    setTogglingIds((prev) => ({ ...prev, [c.id]: true }));
     try {
       if (c.user_id) {
         await invokeAuthenticatedFunction(
@@ -173,10 +198,10 @@ export function CustomersPage() {
           {
             action: "toggle_user_status",
             user_id: c.user_id,
-            is_active: nextActive,
+            is_active: grantAccess,
             customer_status: nextStatus,
           },
-          "Failed to update customer status"
+          "Failed to update customer access"
         );
       } else {
         const { error } = await supabase
@@ -185,20 +210,43 @@ export function CustomersPage() {
           .eq("id", c.id);
         if (error) throw error;
       }
+
+      const wasPending = c.status === "pending";
       toast({
-        title: `${c.business_name} ${nextActive ? "activated" : "deactivated"}`,
-        type: nextActive ? "success" : "info",
+        title: grantAccess
+          ? wasPending
+            ? `Access granted for ${c.business_name}`
+            : `${c.business_name} activated`
+          : wasPending
+            ? `Registration declined for ${c.business_name}`
+            : `${c.business_name} deactivated`,
+        type: grantAccess ? "success" : "info",
       });
+
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["admin-customers"] }),
         queryClient.invalidateQueries({ queryKey: ["admin-customer-detail", c.id] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-pending-customers-count"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-notifications"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin-dashboard-stats"] }),
       ]);
     } catch (err) {
       toast({ title: "Status update failed", description: err instanceof Error ? err.message : "Error", type: "error" });
     } finally {
-      setTogglingId(null);
+      setTogglingIds((prev) => {
+        const next = { ...prev };
+        delete next[c.id];
+        return next;
+      });
     }
   };
+
+  const toggleStatus = async (c: CustomerProfile) => {
+    const nextActive = c.status !== "active";
+    await updateCustomerAccess(c, nextActive);
+  };
+
+  const pendingCustomers = customers.filter((c) => c.status === "pending");
 
   const filtered = customers.filter((c) => {
     if (statusFilter !== "all" && c.status !== statusFilter) return false;
@@ -218,7 +266,7 @@ export function CustomersPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">Customer Management</h1>
           <p className="text-sm text-slate-500">
-            Manage registered local businesses, passwordless portal access, outstanding dues, and custom pricing.
+            Manage registered local businesses, portal access approvals, outstanding dues, and custom pricing.
           </p>
         </div>
         <Button onClick={openCreate}>
@@ -226,6 +274,74 @@ export function CustomersPage() {
           Add Customer Business
         </Button>
       </div>
+
+      {pendingCustomers.length > 0 && statusFilter !== "active" && statusFilter !== "inactive" && statusFilter !== "suspended" && (
+        <Card className="border-amber-300 bg-amber-50/40">
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base text-amber-950">
+              <Clock className="h-4 w-4 text-amber-700" />
+              Pending Registration Requests ({pendingCustomers.length})
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {pendingCustomers.map((c) => (
+              <div
+                key={c.id}
+                className="flex flex-col justify-between gap-3 rounded-lg border border-amber-200 bg-white p-3.5 sm:flex-row sm:items-center"
+              >
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Link to={`/admin/customers/${c.id}`} className="font-semibold text-slate-900 hover:underline">
+                      {c.business_name}
+                    </Link>
+                    <StatusBadge status={c.status} />
+                  </div>
+                  <p className="text-xs text-slate-600">
+                    Owner: <strong>{c.owner_name}</strong> &bull; {c.phone} &bull; {c.email}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    {[c.business_address, c.city, c.state, c.pincode].filter(Boolean).join(", ")}
+                    {c.gst_number ? ` • GSTIN: ${c.gst_number}` : ""}
+                    {` • Requested ${formatDate(c.registered_at)}`}
+                  </p>
+                </div>
+
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    onClick={() => void updateCustomerAccess(c, true)}
+                    disabled={Boolean(togglingIds[c.id])}
+                    className="bg-emerald-600 text-white hover:bg-emerald-700"
+                  >
+                    {togglingIds[c.id] ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                    )}
+                    Grant Access
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void updateCustomerAccess(c, false)}
+                    disabled={Boolean(togglingIds[c.id])}
+                  >
+                    <XCircle className="h-3.5 w-3.5 text-red-600" />
+                    Decline
+                  </Button>
+                  <Link
+                    to={`/admin/customers/${c.id}`}
+                    className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    <Eye className="h-3.5 w-3.5" />
+                    Details
+                  </Link>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -240,12 +356,13 @@ export function CustomersPage() {
               placeholder="Search business, owner, GST..."
               className="sm:w-64"
             />
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-36">
+            <Select value={statusFilter} onValueChange={handleStatusFilterChange}>
+              <SelectTrigger className="w-40">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Statuses</SelectItem>
+                <SelectItem value="pending">Pending Approval</SelectItem>
                 <SelectItem value="active">Active</SelectItem>
                 <SelectItem value="inactive">Inactive</SelectItem>
                 <SelectItem value="suspended">Suspended</SelectItem>
@@ -304,6 +421,21 @@ export function CustomersPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="inline-flex items-center gap-1">
+                        {c.status === "pending" && (
+                          <Button
+                            size="sm"
+                            onClick={() => void updateCustomerAccess(c, true)}
+                            disabled={Boolean(togglingIds[c.id])}
+                            className="h-8 bg-emerald-600 px-2.5 text-xs text-white hover:bg-emerald-700"
+                          >
+                            {togglingIds[c.id] ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            )}
+                            Grant Access
+                          </Button>
+                        )}
                         <Link
                           to={`/admin/customers/${c.id}`}
                           className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
@@ -314,20 +446,33 @@ export function CustomersPage() {
                         <Button variant="ghost" size="icon" onClick={() => openEdit(c)} title="Edit">
                           <Pencil className="h-4 w-4" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => toggleStatus(c)}
-                          disabled={togglingId === c.id}
-                          aria-label={c.status === "active" ? `Deactivate ${c.business_name}` : `Activate ${c.business_name}`}
-                          title={c.status === "active" ? "Deactivate customer" : "Activate customer"}
-                        >
-                          {togglingId === c.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
-                          ) : (
-                            <Power className={c.status === "active" ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-emerald-600"} />
-                          )}
-                        </Button>
+                        {c.status === "pending" ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => void updateCustomerAccess(c, false)}
+                            disabled={Boolean(togglingIds[c.id])}
+                            aria-label={`Decline ${c.business_name}`}
+                            title="Decline registration"
+                          >
+                            <XCircle className="h-4 w-4 text-red-600" />
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => toggleStatus(c)}
+                            disabled={Boolean(togglingIds[c.id])}
+                            aria-label={c.status === "active" ? `Deactivate ${c.business_name}` : `Activate ${c.business_name}`}
+                            title={c.status === "active" ? "Deactivate customer" : "Activate customer"}
+                          >
+                            {togglingIds[c.id] ? (
+                              <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
+                            ) : (
+                              <Power className={c.status === "active" ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-emerald-600"} />
+                            )}
+                          </Button>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -414,11 +559,15 @@ export function CustomersPage() {
               </div>
               <div className="space-y-1.5">
                 <Label>Account Status</Label>
-                <Select value={status} onValueChange={(v) => setStatus(v as "active" | "inactive" | "suspended")}>
+                <Select
+                  value={status}
+                  onValueChange={(v) => setStatus(v as "pending" | "active" | "inactive" | "suspended")}
+                >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    {editing?.status === "pending" && <SelectItem value="pending">Pending Approval</SelectItem>}
                     <SelectItem value="active">Active</SelectItem>
                     <SelectItem value="inactive">Inactive</SelectItem>
                     <SelectItem value="suspended">Suspended</SelectItem>

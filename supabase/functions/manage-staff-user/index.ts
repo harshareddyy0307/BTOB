@@ -140,9 +140,9 @@ Deno.serve(async (req: Request) => {
 
       if (
         requestedCustomerStatus !== undefined &&
-        !["active", "inactive", "suspended"].includes(requestedCustomerStatus)
+        !["pending", "active", "inactive", "suspended"].includes(requestedCustomerStatus)
       ) {
-        return jsonResponse({ error: "customer_status must be active, inactive, or suspended" }, 400);
+        return jsonResponse({ error: "customer_status must be pending, active, inactive, or suspended" }, 400);
       }
 
       if (requestedCustomerStatus !== undefined) {
@@ -180,17 +180,21 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: "You cannot deactivate your own account" }, 400);
       }
 
+      let existingCustomerId: string | null = null;
+      let existingCustomerName: string | null = null;
       let prevCustomerStatus: string | null = null;
       if (targetRole === "customer") {
         const { data: existingCustomer, error: custLookupErr } = await adminClient
           .from("customers")
-          .select("id, status")
+          .select("id, business_name, status")
           .eq("user_id", targetUserId)
           .maybeSingle();
 
         if (custLookupErr) {
           return jsonResponse({ error: custLookupErr.message }, 500);
         }
+        existingCustomerId = existingCustomer?.id ?? null;
+        existingCustomerName = existingCustomer?.business_name ?? null;
         prevCustomerStatus = existingCustomer?.status ?? null;
       }
 
@@ -198,7 +202,9 @@ Deno.serve(async (req: Request) => {
         ? "active"
         : requestedCustomerStatus === "suspended"
           ? "suspended"
-          : "inactive";
+          : requestedCustomerStatus === "pending"
+            ? "pending"
+            : "inactive";
 
       const { error: userUpdateErr } = await adminClient
         .from("users")
@@ -240,20 +246,44 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: authUpdateErr.message }, 400);
       }
 
+      const isPendingResolution = targetRole === "customer" && prevCustomerStatus === "pending";
       const actionName =
         targetRole === "customer"
-          ? is_active
-            ? "activate_customer"
-            : "deactivate_customer"
+          ? isPendingResolution
+            ? is_active
+              ? "approve_customer_registration"
+              : "decline_customer_registration"
+            : is_active
+              ? "activate_customer"
+              : "deactivate_customer"
           : is_active
             ? "activate_user"
             : "deactivate_user";
+
+      if (isPendingResolution && existingCustomerId) {
+        await adminClient
+          .from("notifications")
+          .update({ is_read: true })
+          .eq("entity_type", "customer_registration")
+          .eq("entity_id", existingCustomerId);
+
+        if (is_active) {
+          await adminClient.from("notifications").insert({
+            recipient_role: "customer",
+            recipient_user_id: targetUserId,
+            title: "Portal Access Approved",
+            message: `Access granted for ${existingCustomerName || "your business"}. Welcome to the Customer Portal!`,
+            entity_type: "customer_registration",
+            entity_id: existingCustomerId,
+          });
+        }
+      }
 
       await adminClient.from("audit_logs").insert({
         actor_user_id: caller.id,
         action: actionName,
         entity_type: targetRole === "customer" ? "customers" : "users",
-        entity_id: targetUserId,
+        entity_id: existingCustomerId || targetUserId,
         old_data: {
           is_active: targetProfile.is_active,
           ...(prevCustomerStatus ? { customer_status: prevCustomerStatus } : {}),
