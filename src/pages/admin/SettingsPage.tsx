@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
-import { Settings, Users, ShieldCheck, Upload, Plus, Power, Loader2, History, KeyRound } from "lucide-react";
+import { Settings, Users, ShieldCheck, Upload, Plus, Power, Loader2, History, KeyRound, RotateCcw, ArrowRight } from "lucide-react";
 import { invokeAuthenticatedFunction, supabase } from "@/lib/supabase";
 import { RASTER_IMAGE_ACCEPT, uploadStorageFile } from "@/lib/storage";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDateTime } from "@/lib/utils";
 import type { AgencySettings, AppUser, AuditLogRecord } from "@/types/database";
 import { AdminCredentialsSecurityTab } from "@/components/admin/AdminCredentialsSecurityTab";
+import { ResetPlatformDataTab } from "@/components/admin/ResetPlatformDataTab";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -29,7 +30,7 @@ export function SettingsPage() {
 
   const requestedTab = searchParams.get("tab");
   const activeTab =
-    requestedTab && ["agency", "security", "staff", "audit"].includes(requestedTab) ? requestedTab : "agency";
+    requestedTab && ["agency", "security", "staff", "audit", "reset"].includes(requestedTab) ? requestedTab : "agency";
 
   const [form, setForm] = useState<Partial<AgencySettings>>({});
   const [savingSettings, setSavingSettings] = useState(false);
@@ -224,7 +225,7 @@ export function SettingsPage() {
         value={activeTab}
         onValueChange={(v) => setSearchParams(v === "agency" ? {} : { tab: v }, { replace: true })}
       >
-        <TabsList>
+        <TabsList className="sm:justify-start lg:justify-center">
           <TabsTrigger value="agency">Agency Profile &amp; GST</TabsTrigger>
           <TabsTrigger value="security" className="gap-1.5">
             <KeyRound className="h-3.5 w-3.5" />
@@ -232,6 +233,12 @@ export function SettingsPage() {
           </TabsTrigger>
           <TabsTrigger value="staff">Staff &amp; Admin Users ({staffUsers.length})</TabsTrigger>
           <TabsTrigger value="audit">System Audit Logs ({auditLogs.length})</TabsTrigger>
+          {isOwnerAdmin && (
+            <TabsTrigger value="reset" className="gap-1.5 text-red-700 data-[state=active]:text-red-700">
+              <RotateCcw className="h-3.5 w-3.5" />
+              Reset All Data
+            </TabsTrigger>
+          )}
         </TabsList>
 
         <TabsContent value="agency">
@@ -435,6 +442,33 @@ export function SettingsPage() {
               </form>
             </CardContent>
           </Card>
+
+          {isOwnerAdmin && (
+            <Card className="mt-4 border-red-200 bg-red-50/30">
+              <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+                <div className="min-w-0 space-y-1">
+                  <p className="flex items-center gap-2 text-sm font-semibold text-red-900">
+                    <RotateCcw className="h-4 w-4 shrink-0 text-red-600" />
+                    Reset All Data (Danger Zone)
+                  </p>
+                  <p className="text-xs text-red-900/80">
+                    Clear all customers, manufacturers, categories, products, orders, purchase orders, invoices,
+                    payments, uploaded images, and start fresh.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  className="w-full shrink-0 sm:w-auto"
+                  onClick={() => setSearchParams({ tab: "reset" }, { replace: true })}
+                >
+                  Open Reset Options
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </Button>
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
 
         <TabsContent value="security">
@@ -670,6 +704,10 @@ export function SettingsPage() {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="reset">
+          <ResetPlatformDataTab />
         </TabsContent>
       </Tabs>
 
